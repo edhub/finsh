@@ -36,6 +36,10 @@ typeset -ga _BLE_FILTERED
 # --help 输出缓存（key=命令路径拼接，value=help 文本；同一 session 只解析一次）
 typeset -gA _BLE_HELP_CACHE
 
+# 历史自动建议状态
+typeset -g _BLE_SUGGESTION=""         # 当前建议后缀（POSTDISPLAY 内容）
+typeset -g _BLE_SUGGESTION_NEEDLE=""  # 上次搜索的 needle（避免重复搜索）
+
 # ── 多级过滤函数 ──────────────────────────────────────────────────────────────
 # 结果写入全局 _BLE_FILTERED，避免 $(...) subshell 开销。
 # word 为空时 _BLE_FILTERED 置空，调用方应直接使用原始 pool。
@@ -295,7 +299,7 @@ _fzf_ble_complete() {
                 fi
 
                 if [[ -n "$_ble_help_out" ]]; then
-                    local _ble_help_line
+                    local _ble_help_line _ble_part
                     local -a _ble_opts=() _ble_subcmds=()
                     while IFS= read -r _ble_help_line; do
                         # 选项行：  -x, --long  或       --long
@@ -303,9 +307,17 @@ _fzf_ble_complete() {
                             '^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                             _ble_opts+=("--$match[4]")
                         # 子命令行：恰好 4 空格缩进，首词小写字母开头（非 -）
+                        # 支持逗号分隔多命令同行格式（如 npm --help 的 "All commands:" 段落）
                         elif [[ "$_ble_help_line" =~ \
                             '^    ([a-z][-a-z0-9]*)' ]]; then
-                            _ble_subcmds+=("$match[1]")
+                            if [[ "$_ble_help_line" == *,* ]]; then
+                                for _ble_part in "${(s:,:)_ble_help_line[@]}"; do
+                                    _ble_part="${_ble_part//[[:space:]]/}"  # 去除所有空白
+                                    [[ "$_ble_part" =~ '^[a-z][-a-z0-9]*$' ]] && _ble_subcmds+=("$_ble_part")
+                                done
+                            else
+                                _ble_subcmds+=("$match[1]")
+                            fi
                         fi
                     done <<< "$_ble_help_out"
 
@@ -355,17 +367,85 @@ _fzf_ble_complete() {
     _ble_show_candidates
 }
 
+# ── 历史自动建议 ──────────────────────────────────────────────────────────────
+# 在 $history 中从最近记录向前搜索第一条以 needle 开头且比 needle 更长的命令。
+# 结果写入全局 _BLE_SUGGESTION（避免 subshell 开销）。
+_ble_search_history() {
+    local needle="$1"
+    _BLE_SUGGESTION=""
+    [[ -z "$needle" ]] && return
+
+    local -a nums
+    nums=( ${(Onk)history} )   # 事件号从大到小（最近优先）；不加外层引号，否则 @On 把 keys 当单一字符串
+    local num entry
+    for num in "${nums[@]}"; do
+        entry="${history[$num]}"
+        if [[ "$entry" == "${needle}"* ]] && [[ "$entry" != "$needle" ]]; then
+            _BLE_SUGGESTION="${entry#$needle}"
+            return
+        fi
+    done
+}
+
+# POSTDISPLAY + region_highlight 刷新。
+# 补全循环中不更新（由 _ble_pre_redraw 清零）；光标不在行尾时隐藏；
+# LBUFFER 未变时直接复用缓存，避免每次 pre-redraw 都重新排序 $history。
+_ble_update_suggestion() {
+    emulate -L zsh
+    # 清除旧高亮（memo=ble-sug 标识本插件的条目）
+    region_highlight=( ${region_highlight:#*memo=ble-sug} )
+
+    if (( $#_BLE_CANDS )) || (( CURSOR != ${#LBUFFER} )); then
+        POSTDISPLAY=""
+        return
+    fi
+
+    # LBUFFER 未变：复用缓存
+    if [[ "$LBUFFER" != "$_BLE_SUGGESTION_NEEDLE" ]]; then
+        _ble_search_history "$LBUFFER"
+        _BLE_SUGGESTION_NEEDLE="$LBUFFER"
+    fi
+
+    POSTDISPLAY="$_BLE_SUGGESTION"
+    if [[ -n "$_BLE_SUGGESTION" ]]; then
+        local p=${#BUFFER}
+        region_highlight+=( "${p} $((p + ${#_BLE_SUGGESTION})) fg=8 memo=ble-sug" )
+    fi
+}
+
+# 右方向键：有建议时全量接受，否则退化为普通 forward-char。
+_ble_autosuggest_accept() {
+    emulate -L zsh
+    if [[ -n "$POSTDISPLAY" ]]; then
+        LBUFFER="${LBUFFER}${POSTDISPLAY}"
+        POSTDISPLAY=""
+        region_highlight=( ${region_highlight:#*memo=ble-sug} )
+        _BLE_SUGGESTION=""
+        _BLE_SUGGESTION_NEEDLE="$LBUFFER"
+    else
+        zle forward-char
+    fi
+}
+zle -N _ble_autosuggest_accept
+
 # ── 自动清除候选菜单 ──────────────────────────────────────────────────────────
 # zle-line-pre-redraw 在每次重绘前触发；若上一个 widget 不是本 widget，
 # 说明用户做了其他操作（Backspace、输入、方向键等），此时清除菜单和循环状态。
 _ble_pre_redraw() {
     emulate -L zsh
-    [[ "$LASTWIDGET" == "_fzf_ble_complete" ]] && return
-    (( $#_BLE_CANDS )) || return
-    _BLE_CANDS=()
-    _BLE_IDX=0
-    _BLE_PFX=""
-    zle -M ""
+    if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]]; then
+        # 补全循环期间：清除建议显示，保留候选菜单
+        POSTDISPLAY=""
+        region_highlight=( ${region_highlight:#*memo=ble-sug} )
+        return
+    fi
+    if (( $#_BLE_CANDS )); then
+        _BLE_CANDS=()
+        _BLE_IDX=0
+        _BLE_PFX=""
+        zle -M ""
+    fi
+    _ble_update_suggestion
 }
 autoload -Uz add-zle-hook-widget
 add-zle-hook-widget zle-line-pre-redraw _ble_pre_redraw
@@ -373,3 +453,5 @@ add-zle-hook-widget zle-line-pre-redraw _ble_pre_redraw
 zle -N _fzf_ble_complete
 bindkey '^I'   _fzf_ble_complete   # Tab
 bindkey '^[[Z' complete-word       # Shift+Tab 保留原生补全
+bindkey '^[[C' _ble_autosuggest_accept   # 右方向键（大多数终端）
+bindkey '^[OC' _ble_autosuggest_accept   # 右方向键（部分终端）

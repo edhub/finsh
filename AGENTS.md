@@ -58,11 +58,28 @@ fzf-ble-complete/
 - pool 为空时：`_ble_registered=1` → 静默退出；`=0` → fallback `zle complete-word`
 - 避免 `_just` 等在无 justfile 时因二次触发产生 `=` 等噪声
 
-### `print -l --`
+### `local` 在 ZLE widget 循环体内的副作用
+
+- `local var` 在 `while`/`for` 循环体内每次都执行一次 `typeset`
+- zle widget 上下文中，`typeset` 的初始化会把 `var=''` 输出到终端
+- 修法：**把所有 `local` 声明提到循环外**，与同层其他局部变量合并声明
+
+### help 解析——逗号分隔多命令行（npm 格式）
+
+- `npm --help` 的 "All commands:" 段把所有子命令逗号分隔平铺在同一行：
+  `    access, adduser, ..., install, install-ci-test, ...`
+- 旧正则 `'^    ([a-z][-a-z0-9]*)'` 只抓行首第一个词，行中间的命令全部丢失
+- 修法：匹配到含逗号的缩进行时，按 `,` 拆分 → 去除空白 → 逐词校验 `'^[a-z][-a-z0-9]*$'`
 
 - 候选词可能以 `--` 开头（如 `--release`）
 - `print -l "--release"` 会把 `--release` 解析为 flag → 报错
 - 所有 `print -l` 一律加 `--`：`print -l -- "${array[@]}"`
+
+### `${(Onk)hash}` vs `"${(@On)${(k)hash}}"`
+
+- `${(k)hash}` 展开为标量（如 `"3 2 1"`），加外层引号 + `@` 会把整个字符串当单个数组元素
+- 正确写法：`nums=( ${(Onk)history} )`，`k` 作为展开 flag，无外层引号，word-splitting 自动 split
+- 错误写法：`nums=( "${(@On)${(k)history}}" )` → `nums` 只有一个元素 `"3 2 1"`，for 循环用它查哈希必然为空
 
 ### `${(Az)prefix}[1]` 取首词
 
