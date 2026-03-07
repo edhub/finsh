@@ -29,6 +29,7 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 |------|------|
 | `Tab` | fuzzy 补全，连按循环切换候选 |
 | `Shift+Tab` | 原生 zsh 补全（保留上下文感知行为）|
+| `→` | 接受历史自动建议；无建议时退化为 forward-char |
 | 任意其他键 | 接受当前候选，列表消失 |
 
 ---
@@ -45,7 +46,7 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 
 ## 匹配优先级
 
-所有 pass 运行前先按首字母预过滤，逐级降级，命中即停止：
+所有 pass 运行前先按首字母预过滤，逐级降级，命中即停止。详见 [DESIGN.md § 匹配优先级](DESIGN.md#匹配优先级_ble_filter)。
 
 | Pass | 名称 | 示例 |
 |------|------|------|
@@ -62,5 +63,5 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 | 文件 | 说明 |
 |------|------|
 | `fzf-ble-complete.zsh` | 唯一实现文件 |
-| `zsh-fuzzy-completion.md` | 完整设计文档（架构、实现细节、Bug 历史）|
-| `AGENTS.md` | AI agent 上下文（关键约束与坑点）|
+| `DESIGN.md` | 设计文档（架构、实现细节、Bug 历史）|
+| `AGENTS.md` | AI agent 上下文（约束清单、快速参考）|

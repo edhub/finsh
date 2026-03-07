@@ -428,6 +428,24 @@ _ble_autosuggest_accept() {
 }
 zle -N _ble_autosuggest_accept
 
+# ── 包装 accept-line：在最终渲染前清空建议 ────────────────────────────────────
+# zle-line-finish 触发时 ZLE 已完成最终渲染，清空 POSTDISPLAY 为时已晚；
+# 必须在 accept-line 被调用时立即清空，才能阻止灰色文字随行输出打印到终端。
+# 问题根因：accept-line 后 zle-line-pre-redraw 仍会触发一次 _ble_update_suggestion。
+# 若把 _BLE_SUGGESTION_NEEDLE 重置为 ""，update-sug 会判断 LBUFFER != needle，
+# 重新搜历史并把建议写回 POSTDISPLAY，灰色文字随最终渲染打印到终端。
+# 修复：将 needle 设为当前 LBUFFER（而非 ""），使 update-sug 命中缓存，
+# 复用已清空的 _BLE_SUGGESTION=""，POSTDISPLAY 保持为空。
+_ble_accept_line() {
+    emulate -L zsh
+    POSTDISPLAY=""
+    region_highlight=( ${region_highlight:#*memo=ble-sug} )
+    _BLE_SUGGESTION=""
+    _BLE_SUGGESTION_NEEDLE="$LBUFFER"   # 锁定 needle，阻止 pre-redraw 重新搜历史
+    zle .accept-line
+}
+zle -N accept-line _ble_accept_line
+
 # ── 自动清除候选菜单 ──────────────────────────────────────────────────────────
 # zle-line-pre-redraw 在每次重绘前触发；若上一个 widget 不是本 widget，
 # 说明用户做了其他操作（Backspace、输入、方向键等），此时清除菜单和循环状态。
