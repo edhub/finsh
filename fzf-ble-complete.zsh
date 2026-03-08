@@ -17,7 +17,7 @@
 # 补全场景：
 #   命令名   – 从 commands / functions / aliases / builtins 收集
 #   子命令   – 有注册补全函数时用 zle -C 建立正规 completion context，hook compadd 截获
-#            – 无注册补全函数时尝试 $cmd --list（cargo / helm / kubectl 等）
+#            – 无注册补全函数时尝试解析 $cmd --help 输出（状态机）
 #   路径     – glob 当前目录层，按文件名部分过滤
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -43,6 +43,11 @@ typeset -ga _BLE_PARSE_OPTS      # 解析出的 --flag 列表
 # 历史自动建议状态
 typeset -g _BLE_SUGGESTION=""         # 当前建议后缀（POSTDISPLAY 内容）
 typeset -g _BLE_SUGGESTION_NEEDLE=""  # 上次搜索的 needle（避免重复搜索）
+
+# _ble_collect_subcmd_pool 的输出变量（避免 subshell）
+typeset -ga _BLE_POOL_TMP=()   # 收集到的候选池
+typeset -gi _BLE_REG_TMP=0     # 是否有注册补全函数（0/1）
+typeset -g  _BLE_WORD_TMP=""   # 可能被修改的 word（opts-only 工具补 "--" 前缀）
 
 # ── --help 输出解析 ────────────────────────────────────────────────────────────
 # 输入：$1 = --help 的原始输出文本
@@ -123,7 +128,7 @@ _ble_parse_help() {
             ;;
 
         opts)
-            # --flag 行，带或不带 -x, 前缀
+            # --flag 行，带或不带 -x, 前缀（-[a-zA-Z0-9]+ 支持 -nv, -nc, -4 等多字符短选项）
             if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                 _BLE_PARSE_OPTS+=("--$match[4]")
             fi
@@ -279,6 +284,146 @@ _fzf_ble_capture() {
     # unfunction compadd 由 widget 的 always 块统一负责，此处无需重复
 }
 
+# ── 路径补全 ──────────────────────────────────────────────────────────────────
+# word 含 / 时调用。返回 0 表示已处理（widget 应 return），1 表示非路径词（继续）。
+# 读取：$1=word，$2=prefix（光标前的不变部分）
+# 写入：_BLE_CANDS / _BLE_PFX / _BLE_IDX / LBUFFER（ZLE 状态）
+_ble_try_path() {
+    emulate -L zsh
+    setopt extendedglob nullglob
+    local _word="$1" _prefix="$2"
+    [[ "$_word" == */* ]] || return 1
+
+    local dir base
+    if [[ "$_word" == */ ]]; then
+        # 末尾 / 代表用户明确要补全目录内容（如 ls ~/dev/）
+        # 不能用 :h/:t —— ~/dev/:h="~", :t="dev"，会丢掉目录层级
+        dir="${_word%/}"   # 去掉尾 /，保留完整目录路径
+        base=""
+    else
+        dir="${_word:h}"
+        base="${_word:t}"
+    fi
+    # base 不足 2 个字符时不触发（含 trailing-slash 的 base="" 情况）
+    (( ${#base} >= 2 )) || return 0
+
+    local xdir="${dir/#\~/$HOME}"   # 展开 ~ （双引号内 ~ 不展开，替换前缀）
+    local sep="${dir%/}/"           # 规范化分隔符：去掉末尾 / 再加回，避免 dir="/" 时双斜杠
+    local xbase="${xdir%/}"         # 去掉末尾 /，防止 "/" → "//" 路径拼接问题
+    local -a names
+    if [[ -z "$xbase" ]]; then
+        names=( /*(.DN) /*(/DN) )     # 根目录：直接 glob，结果为 /Applications 等
+    else
+        names=( "${xbase}"/*(.DN) "${xbase}"/*(/DN) )
+    fi
+    names=( "${names[@]#${xbase}/}" )  # 剥离目录前缀，只保留文件名
+
+    if (( $#names == 0 )); then zle complete-word; return 0; fi
+
+    _ble_filter "$base" "${names[@]}"
+    # base 为空（word="dir/"）时展示目录下全部文件；有 base 但无匹配则展示全部（路径 pool 通常很小）
+    local -a show
+    if (( $#_BLE_FILTERED )); then
+        show=("${_BLE_FILTERED[@]}")
+    else
+        show=("${names[@]}")
+    fi
+
+    if (( $#show == 1 )); then
+        LBUFFER="${_prefix}${sep}${show[1]}"
+        zle reset-prompt
+        return 0
+    fi
+
+    _BLE_CANDS=( "${show[@]}" )
+    _BLE_PFX="${_prefix}${sep}"
+    _BLE_IDX=1
+    LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
+    _ble_show_candidates
+    return 0
+}
+
+# ── 子命令 / 选项候选收集 ──────────────────────────────────────────────────────
+# 输入：$1=word，$2=prefix（光标前缀）
+# 输出写入全局变量（避免 subshell）：
+#   _BLE_POOL_TMP  – 收集到的候选池
+#   _BLE_REG_TMP   – 是否有注册补全函数（0/1）
+#   _BLE_WORD_TMP  – 可能被修改的 word（opts-only 工具会加 "--" 前缀）
+#
+# 三种情况都会尝试 --help 路径：
+#   ① 无注册补全函数（如 zig、hx 安装前）
+#   ② 有注册函数但 hook 为空——_arguments 底层 comparguments builtin 绕过 compadd hook
+#   ③ word 以 - 开头但 hook 捕获到的全是文件/URL 等非选项候选（如 _wget 的 _urls→_files）
+_ble_collect_subcmd_pool() {
+    emulate -L zsh
+    local _word="$1" _prefix="$2"
+    _BLE_POOL_TMP=()
+    _BLE_REG_TMP=0
+    _BLE_WORD_TMP="$_word"
+
+    local _ble_cmd="${${(Az)_prefix}[1]-}"
+
+    if [[ -n "${_comps[$_ble_cmd]-}" ]]; then
+        # ── 有注册补全函数：走 zle -C 捕获路径 ──────────────────────────────
+        _BLE_REG_TMP=1
+        # 用 zle -C 建立正规 completion context，在此 context 内 compadd 可被函数覆盖
+        _FZF_BLE_POOL=()
+        zle -C _fzf_ble_cap complete-word _fzf_ble_capture
+        local slbuf=$LBUFFER srbuf=$RBUFFER
+        {
+            # 移除当前词，让 zsh 以空词在上下文中生成完整候选
+            LBUFFER="$_prefix"
+            RBUFFER=""
+            CURSOR=${#LBUFFER}
+            zle _fzf_ble_cap 2>/dev/null
+        } always {
+            LBUFFER="$slbuf"
+            RBUFFER="$srbuf"
+            zle -D _fzf_ble_cap 2>/dev/null
+            unfunction compadd 2>/dev/null   # 防止异常退出时 compadd 残留
+        }
+        _BLE_POOL_TMP=( "${_FZF_BLE_POOL[@]}" )
+        _FZF_BLE_POOL=()
+    fi
+
+    # ── compadd 未能捕获 或 无注册补全函数：解析 $cmd --help ─────────────────
+    if [[ -n "$_ble_cmd" ]] && {
+        (( $#_BLE_POOL_TMP == 0 )) ||
+        { [[ "$_word" == -* ]] && (( ${#${(M)_BLE_POOL_TMP:#-*}} == 0 )) }
+    }; then
+        _BLE_POOL_TMP=()   # 丢弃无关候选（如文件名），准备用 --help 结果覆盖
+        local -a _ble_help_words=()
+        local _ble_w
+        for _ble_w in ${(Az)_prefix}; do
+            [[ "$_ble_w" == -* ]] || _ble_help_words+=("$_ble_w")
+        done
+
+        # 缓存 key = 命令词列表拼接，同一 session 相同子命令路径只 fork 一次
+        local _ble_cache_key="${(j: :)_ble_help_words}"
+        local _ble_help_out
+        if [[ -n "${_BLE_HELP_CACHE[$_ble_cache_key]+x}" ]]; then
+            _ble_help_out="${_BLE_HELP_CACHE[$_ble_cache_key]}"
+        else
+            _ble_help_out="$(command "${_ble_help_words[@]}" --help 2>&1)"
+            _BLE_HELP_CACHE[$_ble_cache_key]="$_ble_help_out"
+        fi
+
+        if [[ -n "$_ble_help_out" ]]; then
+            _ble_parse_help "$_ble_help_out"
+            if [[ "$_word" == -* ]]; then
+                _BLE_POOL_TMP=( "${_BLE_PARSE_OPTS[@]}" )
+            elif (( $#_BLE_PARSE_SUBCMDS )); then
+                _BLE_POOL_TMP=( "${_BLE_PARSE_SUBCMDS[@]}" )
+            elif (( $#_BLE_PARSE_OPTS )); then
+                # 无子命令但有选项（如 node、hx）
+                # 把 opts 纳入 pool；word 非空时补 -- 前缀，使 "bu" 能匹配 "--build-sea"
+                _BLE_POOL_TMP=( "${_BLE_PARSE_OPTS[@]}" )
+                [[ -n "$_word" ]] && _BLE_WORD_TMP="--${_word}"
+            fi
+        fi
+    fi
+}
+
 # ── ZLE widget ────────────────────────────────────────────────────────────────
 _fzf_ble_complete() {
     emulate -L zsh
@@ -315,51 +460,7 @@ _fzf_ble_complete() {
 
     # ── 路径补全 ──────────────────────────────────────────────────────────────
     if [[ "$word" == */* ]]; then
-        local dir base
-        if [[ "$word" == */ ]]; then
-            # 末尾 / 代表用户明确要补全目录内容（如 ls ~/dev/）
-            # 不能用 :h/:t —— ~/dev/:h="~", :t="dev"，会丢掉目录层级
-            dir="${word%/}"   # 去掉尾 /，保留完整目录路径
-            base=""
-        else
-            dir="${word:h}"
-            base="${word:t}"
-        fi
-        # base 不足 2 个字符时不触发（含 trailing-slash 的 base="" 情况）
-        (( ${#base} >= 2 )) || return
-        local xdir="${dir/#\~/$HOME}"   # 展开 ~ （双引号内 ~ 不展开，替换前缀）
-        local sep="${dir%/}/"           # 规范化分隔符：去掉末尾 / 再加回，避免 dir="/" 时双斜杠
-        local xbase="${xdir%/}"         # 去掉末尾 /，防止 "/" → "//" 路径拼接问题
-        local -a names
-        if [[ -z "$xbase" ]]; then
-            names=( /*(.DN) /*(/DN) )     # 根目录：直接 glob，结果为 /Applications 等
-        else
-            names=( "${xbase}"/*(.DN) "${xbase}"/*(/DN) )
-        fi
-        names=( "${names[@]#${xbase}/}" )  # 剥离目录前缀，只保留文件名
-
-        if (( $#names == 0 )); then zle complete-word; return; fi
-
-        _ble_filter "$base" "${names[@]}"
-        # base 为空（word="dir/"）时展示目录下全部文件；有 base 但无匹配则展示全部（路径 pool 通常很小）
-        local -a show
-        if (( $#_BLE_FILTERED )); then
-            show=("${_BLE_FILTERED[@]}")
-        else
-            show=("${names[@]}")
-        fi
-
-        if (( $#show == 1 )); then
-            LBUFFER="${prefix}${sep}${show[1]}"
-            zle reset-prompt
-            return
-        fi
-
-        _BLE_CANDS=( "${show[@]}" )
-        _BLE_PFX="${prefix}${sep}"
-        _BLE_IDX=1
-        LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
-        _ble_show_candidates
+        _ble_try_path "$word" "$prefix"
         return
     fi
 
@@ -367,7 +468,8 @@ _fzf_ble_complete() {
     (( ${#word} >= 2 )) || return
 
     local -a pool=()
-    local _ble_registered=0   # 标记是否有注册补全函数（影响 pool 空时的回退策略）
+    local _ble_registered=0
+
     # ── 命令名补全 ────────────────────────────────────────────────────────────
     if [[ "$prefix" =~ '^[[:space:]]*$' ]]; then
         pool=(
@@ -377,77 +479,12 @@ _fzf_ble_complete() {
             ${(k)builtins}
         )
 
-    # ── 子命令 / 选项补全 ─────────────────────────────────────────────────────
+    # ── 子命令 / 选项補全 ─────────────────────────────────────────────────────
     else
-        local _ble_cmd="${${(Az)prefix}[1]-}"
-
-        if [[ -n "${_comps[$_ble_cmd]-}" ]]; then
-            # ── 有注册补全函数：走 zle -C 捕获路径 ──────────────────────────
-            _ble_registered=1
-            # 用 zle -C 建立正规 completion context，在此 context 内 compadd 可被函数覆盖
-            _FZF_BLE_POOL=()
-            zle -C _fzf_ble_cap complete-word _fzf_ble_capture
-            local slbuf=$LBUFFER srbuf=$RBUFFER
-            {
-                # 移除当前词，让 zsh 以空词在上下文中生成完整候选
-                LBUFFER="$prefix"
-                RBUFFER=""
-                CURSOR=${#LBUFFER}
-                zle _fzf_ble_cap 2>/dev/null
-            } always {
-                LBUFFER="$slbuf"
-                RBUFFER="$srbuf"
-                zle -D _fzf_ble_cap 2>/dev/null
-                unfunction compadd 2>/dev/null   # 防止异常退出时 compadd 残留
-            }
-            pool=( "${_FZF_BLE_POOL[@]}" )
-            _FZF_BLE_POOL=()
-        fi
-
-        # ── compadd 未能捕获 或 无注册补全函数：解析 $cmd --help ─────────────
-        # 三种情况都走此路径：
-        #   ① 无注册补全函数（如 zig、hx 安装前）
-        #   ② 有注册函数但 hook 为空——最常见原因是补全函数使用了 _arguments，
-        #      其底层 comparguments builtin 绕过了 function-level compadd hook
-        #      （典型例子：_hx 用 _arguments -C，hx 选项无法被捕获）
-        #   ③ word 以 - 开头（用户想补选项），但 hook 捕获到的全是文件/URL 等非选项候选
-        #      （典型例子：_wget 的 _arguments 调用了 _urls→_files→compadd，
-        #       捕获到当前目录文件名；这些文件名全不以 - 开头，对选项补全毫无用处）
-        if [[ -n "$_ble_cmd" ]] && {
-            (( $#pool == 0 )) ||
-            { [[ "$word" == -* ]] && (( ${#${(M)pool:#-*}} == 0 )) }
-        }; then
-            pool=()   # 丢弃无关候选（如文件名），准备用 --help 结果覆盖
-            local -a _ble_help_words=()
-            local _ble_w
-            for _ble_w in ${(Az)prefix}; do
-                [[ "$_ble_w" == -* ]] || _ble_help_words+=("$_ble_w")
-            done
-
-            # 缓存 key = 命令词列表拼接，同一 session 相同子命令路径只 fork 一次
-            local _ble_cache_key="${(j: :)_ble_help_words}"
-            local _ble_help_out
-            if [[ -n "${_BLE_HELP_CACHE[$_ble_cache_key]+x}" ]]; then
-                _ble_help_out="${_BLE_HELP_CACHE[$_ble_cache_key]}"
-            else
-                _ble_help_out="$(command "${_ble_help_words[@]}" --help 2>&1)"
-                _BLE_HELP_CACHE[$_ble_cache_key]="$_ble_help_out"
-            fi
-
-            if [[ -n "$_ble_help_out" ]]; then
-                _ble_parse_help "$_ble_help_out"
-                if [[ "$word" == -* ]]; then
-                    pool=( "${_BLE_PARSE_OPTS[@]}" )
-                elif (( $#_BLE_PARSE_SUBCMDS )); then
-                    pool=( "${_BLE_PARSE_SUBCMDS[@]}" )
-                elif (( $#_BLE_PARSE_OPTS )); then
-                    # 无子命令但有选项（如 node、hx）
-                    # 把 opts 纳入 pool；word 非空时补 -- 前缀，使 "bu" 能匹配 "--build-sea"
-                    pool=( "${_BLE_PARSE_OPTS[@]}" )
-                    [[ -n "$word" ]] && word="--${word}"
-                fi
-            fi
-        fi
+        _ble_collect_subcmd_pool "$word" "$prefix"
+        pool=( "${_BLE_POOL_TMP[@]}" )
+        _ble_registered=$_BLE_REG_TMP
+        word="$_BLE_WORD_TMP"
     fi
 
     pool=( ${(u)pool} )   # 去重

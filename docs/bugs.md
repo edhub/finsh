@@ -6,17 +6,17 @@
 
 ## 路径补全
 
-**Bug 1 — `~` 路径 glob 失败**（`cd ~/dev/fzf<tab>`）
+### Bug 1 — `~` 路径 glob 失败（`cd ~/dev/fzf<tab>`）
 
 原因：`~` 在双引号内不展开，`"${~dir}"` 语法在此场景下无效。  
 修法：`${dir/#\~/$HOME}` 手动替换前缀。
 
-**Bug 2 — 根目录双斜杠**（`cd /Use<tab>` → `//Users`）
+### Bug 2 — 根目录双斜杠（`cd /Use<tab>` → `//Users`）
 
 原因：`dir="/"` 时 `xbase="/"` 拼接产生 `"/"/*` = `//Applications` 等。  
 修法：`xbase="${xdir%/}"` 去尾斜杠，并对 `xbase=""` 单独走 `/*(.DN)` glob。
 
-**Bug 3 — dotfile 不出现**（`vi ~/.zsh<tab>` → `AndroidStudioProjects`）
+### Bug 3 — dotfile 不出现（`vi ~/.zsh<tab>` → `AndroidStudioProjects`）
 
 原因：glob `*` 默认不匹配 `.` 开头的文件，filter 无命中后 show=pool，首个字母序候选是非 dotfile。  
 修法：glob qualifier 加 `D`，即 `*(.DN)` / `*(/DN)`。
@@ -25,17 +25,17 @@
 
 ## help 解析
 
-**Bug 4 — `cargo bu<tab>` 补全到本地文件**
+### Bug 4 — `cargo bu<tab>` 补全到本地文件
 
 原因：`_comps[cargo]` 为空，zle-C 路径跳过，help 解析路径也跳过，pool 为空后 fallback `zle complete-word` → `_default` → 文件补全。  
 修法：无注册补全函数时解析 `cargo --help`，word 不以 `-` 开头则取 4-空格缩进子命令行作为 pool。
 
-**Bug 5 — `cargo build --rel<tab>` 补全失败**
+### Bug 5 — `cargo build --rel<tab>` 补全失败
 
 原因：`--rel` 以 `-` 开头，但 pool 来自 `_ble_subcmds`（空）。  
 修法：help 解析时 word 以 `-` 开头则取选项行（`--flag` 格式）作为 pool。
 
-**Bug 12 — `npm in<tab>` 输出 `_ble_part=''` 杂项 + 遗漏 `install`**
+### Bug 12 — `npm in<tab>` 输出 `_ble_part=''` 杂项 + 遗漏 `install`
 
 原因（双重）：
 1. `npm --help` 的子命令以**逗号分隔平铺在同一行**（`    access, adduser, ..., install, ...`），旧逻辑只抓每行第一个词，`install` 等藏在行中间的命令全部丢失。
@@ -49,12 +49,12 @@
 
 ## 语言 / 语法陷阱
 
-**Bug 6 — `${(z)prefix}[1]` 取到首字符而非首词**
+### Bug 6 — `${(z)prefix}[1]` 取到首字符而非首词
 
 原因：`${(z)prefix}` 返回数组，但下标写在 `${}` 外面时取的是字符串第一个字符。  
 修法：改为 `${${(Az)prefix}[1]}`，`(A)` 将结果强制为数组后再取 `[1]`。
 
-**Bug 13 — 历史建议始终为空**
+### Bug 13 — 历史建议始终为空
 
 原因：`"${(@On)${(k)history}}"` 加了外层引号，`@` 把 `${(k)history}` 展开的标量 `"3 2 1"` 当成**单个元素**，导致 `nums=("3 2 1")`，for 循环用它查 `$history` 当然是空。  
 修法：改为 `${(Onk)history}`，`k` 直接作为展开 flag，无外层引号，word-splitting 正确切分：
@@ -67,7 +67,7 @@ nums=( ${(Onk)history} )   # ✓ 得到 ("3" "2" "1")
 
 ## compadd hook 解析
 
-**Bug 8 — `just <tab>` 无 justfile 时补全到 `=`（根本原因）**
+### Bug 8 — `just <tab>` 无 justfile 时补全到 `=`（根本原因）
 
 原因：`_describe` 传给 `compadd` 的是组合 flag `-qS`（不是 `-q -S`）。hook 里 `-qS` 匹配 `-*` 分支被忽略，下一个参数 `=`（suffix 值）没被跳过，直接当候选词进了 pool，最终 pool=`("=")` → 唯一候选直接补全。  
 修法：`-*` 分支加检测，若组合 flag 中含有带参字符（`[PSpsWdJVXxrRMFtoEIi]`）则 `skip_next=1`。
@@ -76,12 +76,12 @@ nums=( ${(Onk)history} )   # ✓ 得到 ("3" "2" "1")
 
 ## 循环状态
 
-**Bug 7 — `just <tab>` 无 justfile 时补全到 `=`（表象）**
+### Bug 7 — `just <tab>` 无 justfile 时补全到 `=`（表象）
 
 原因：`_comps[just]=_just`，zle-C capture 运行，pool 为空，fallback `zle complete-word` 再次触发 `_just`，在真实 completion context 下将 `=` 作为 suffix 插入 buffer。  
 修法：引入 `_ble_registered` 标志，有注册补全函数但 pool 为空时**静默退出**，不 fallback。
 
-**Bug 9 — 循环模式误用旧状态**
+### Bug 9 — 循环模式误用旧状态
 
 原因：循环检查只看 `$LASTWIDGET` 和 `$#_BLE_CANDS`，不验证 buffer 位置。旧 bug 留下 `_BLE_CANDS=("=")` 后，下次 Tab 直接进循环复现旧问题。  
 修法：循环条件加 `[[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]`，buffer 不匹配则视为新一轮补全。
@@ -90,12 +90,12 @@ nums=( ${(Onk)history} )   # ✓ 得到 ("3" "2" "1")
 
 ## 匹配过于宽松
 
-**Bug 10 — 输入 `picli` 时补全出大量无关候选**
+### Bug 10 — 输入 `picli` 时补全出大量无关候选
 
 原因：Pass 2c（pure subsequence）生成 `*p*i*c*l*i*`，在几千个命令的 pool 里能命中任意包含这五个字母（按序）的字符串。  
 修法：在 `_ble_filter` 所有 pass 运行前加首字母预过滤，pool 收窄到首字母与 `word[1]` 相同的候选：`pool=( ${(M)pool:#${(b)word[1]}*} )`。
 
-**Bug 11 — 无匹配时 dump 全 pool**
+### Bug 11 — 无匹配时 dump 全 pool
 
 原因：`_BLE_FILTERED` 为空时，`show` fallback 到完整 pool，几千条候选全部展示。  
 修法：主 widget 中 word 非空但无匹配时直接 return，只有 word 为空时才展示全 pool。
@@ -114,7 +114,7 @@ fi
 
 ## 历史自动建议
 
-**Bug 14 — 回车后灰色建议残留在终端输出中**
+### Bug 14 — 回车后灰色建议残留在终端输出中
 
 现象：历史记录是 `ls tools`，用户只输入 `ls` 然后回车，终端输出行显示 `ls tools`，但实际执行的是 `ls`。
 
@@ -139,7 +139,7 @@ zle -N accept-line _ble_accept_line
 
 ## `_arguments` 绕过 compadd hook / opts-only 工具
 
-**Bug 15 — `hx <Tab>` 无补全（`_arguments` 绕过 function-level compadd）**
+### Bug 15 — `hx <Tab>` 无补全（`_arguments` 绕过 function-level compadd）
 
 现象：`hx` 有注册补全函数 `_hx`，但 `hx <Tab>` 什么都不显示。
 
@@ -167,7 +167,7 @@ if (( $#pool == 0 )) && [[ -n "$_ble_cmd" ]]; then
 fi
 ```
 
-**Bug 16 — `node bu<Tab>` 无补全（opts-only 工具路由错误）**
+### Bug 16 — `node bu<Tab>` 无补全（opts-only 工具路由错误）
 
 现象：`node --help` 有 181 个选项，但 `node bu<Tab>` 什么都不补全。
 
@@ -177,7 +177,7 @@ fi
 - `"bu"` → `"--bu"` → 前缀匹配 `--build-sea`、`--build-snapshot`、`--build-snapshot-config`
 - `_BLE_PFX` 仍为 `"node "`，候选直接替换原始 `"bu"`，LBUFFER 变为 `"node --build-sea"`
 
-**Bug 17 — `node -b<Tab><Tab>` 第二次 Tab 报错 `zle:24: bad option: -b`**
+### Bug 17 — `node -b<Tab><Tab>` 第二次 Tab 报错 `zle:24: bad option: -b`
 
 现象：第一次 Tab 正常（LBUFFER → `node --build-sea`），第二次 Tab 报错 `_ble_show_candidates:zle:24: bad option: -b`。
 
@@ -197,7 +197,7 @@ zle -M -- "--build-sea  [--build-snapshot]  ..."
 
 ---
 
-**Bug 18 — `cargo bu<Tab>` 候选里出现 `but`（描述文字里的逗号被误解析为 alias 分隔符）**
+### Bug 18 — `cargo bu<Tab>` 候选里出现 `but`（描述文字里的逗号被误解析为 alias 分隔符）
 
 现象：`cargo bu<Tab>` 候选列表为 `[build]  but`，`but` 是干扰词。
 
@@ -221,7 +221,7 @@ for _part in "${(s:,:)_aliases_part[@]}"; do ...
 
 ---
 
-**Bug 19 — `wget --no<Tab>` 漏掉 `--no-verbose` 等选项（多字符短选项不匹配）**
+### Bug 19 — `wget --no<Tab>` 漏掉 `--no-verbose` 等选项（多字符短选项不匹配）
 
 现象：`wget --no<Tab>` 少了 `--no-verbose`、`--no-clobber`、`--inet4-only`、`--inet6-only` 等 7 个选项。
 
@@ -240,7 +240,7 @@ for _part in "${(s:,:)_aliases_part[@]}"; do ...
 
 ---
 
-**Bug 20 — `wget -hel<Tab>` 静默无补全（_arguments 副作用污染 pool）**
+### Bug 20 — `wget -hel<Tab>` 静默无补全（_arguments 副作用污染 pool）
 
 现象：`wget -hel<Tab>` 无任何补全，预期应填入 `--help`。
 

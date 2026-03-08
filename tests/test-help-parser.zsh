@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # tests/test-help-parser.zsh
-# 测试 _ble_parse_help 函数的 help 输出解析逻辑
+# 测试 _ble_parse_help 函数的 help 输出解析逻辑，以及 _ble_filter 多级匹配逻辑
 #
 # 用法：
 #   zsh tests/test-help-parser.zsh
@@ -11,8 +11,8 @@ emulate -L zsh
 setopt extendedglob
 
 # ── 加载被测函数 ──────────────────────────────────────────────────────────────
-# 只 source 用到的全局变量声明和 _ble_parse_help 函数；
-# 用 awk 截取到 "_ble_filter" 定义前，避免加载 ZLE/widget 相关代码
+# 只 source 用到的全局变量声明和 _ble_parse_help / _ble_filter 函数；
+# 用 awk 截取到 "_ble_show_candidates" 定义前，避免加载 ZLE/widget 相关代码
 # （ZLE 只在 interactive shell 中可用，测试环境无 zle 命令）
 _SCRIPT_DIR="${0:A:h}/.."
 typeset -ga _BLE_PARSE_SUBCMDS
@@ -202,6 +202,8 @@ _assert_contains "${_BLE_PARSE_OPTS[@]}"    "--quiet"   "cargo: --quiet 选项"
 _assert_contains "${_BLE_PARSE_OPTS[@]}"    "--offline" "cargo: --offline 选项"
 # "..." 不应入池（不匹配 [a-z][-a-z0-9]*）
 _assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "..."  "cargo: '...' 不应入池"
+# Bug 18：描述文字里的逗号不应切出假词
+_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "but"  "cargo Bug18: 描述里的 'but' 不应入池"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 4: npm --help（4 空格缩进，多行逗号列表）
@@ -367,6 +369,41 @@ _ble_filter "$_word" "${_pool[@]}"
 _assert_contains "${_BLE_FILTERED[@]}" "--build-sea"      "node routing: 'bu' 匹配 --build-sea"
 _assert_contains "${_BLE_FILTERED[@]}" "--build-snapshot" "node routing: 'bu' 匹配 --build-snapshot"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 8: wget --help（多字符短选项 -nv, -nc, -4, -6 — Bug 19）
+# ─────────────────────────────────────────────────────────────────────────────
+run_test "wget  (multi-char short options: -nv, -nc, -4, -6 — Bug 19)" \
+'GNU Wget 1.21.4, a non-interactive network retriever.
+Usage: wget [OPTION]... [URL]...
+
+Startup:
+  -V,  --version           display the version of Wget and exit
+  -h,  --help              print this help
+  -b,  --background        go to background after startup
+  -e,  --execute=COMMAND   execute a .wgetrc-style command
+
+Logging and input file:
+  -o,  --output-file=FILE  log messages to FILE
+  -a,  --append-output=FILE  append messages to FILE
+  -nv, --no-verbose        turn off verboseness, without being quiet
+  -nc, --no-clobber        skip downloads that would download to existing files
+  -4,  --inet4-only        connect only to IPv4 addresses
+  -6,  --inet6-only        connect only to IPv6 addresses
+  -q,  --quiet             quiet (no output)
+  -v,  --verbose           be verbose (this is the default)
+       --no-dns-cache      Disable caching DNS lookups.'
+
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--version"      "wget Bug19: --version (单字母短选项)"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--help"         "wget Bug19: --help"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--no-verbose"   "wget Bug19: --no-verbose (多字符短选项 -nv,)"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--no-clobber"   "wget Bug19: --no-clobber (多字符短选项 -nc,)"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--inet4-only"   "wget Bug19: --inet4-only (数字短选项 -4,)"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--inet6-only"   "wget Bug19: --inet6-only (数字短选项 -6,)"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--quiet"        "wget Bug19: --quiet"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--verbose"      "wget Bug19: --verbose"
+_assert_contains "${_BLE_PARSE_OPTS[@]}" "--no-dns-cache" "wget Bug19: --no-dns-cache (无短格式)"
+_assert_empty    "${_BLE_PARSE_SUBCMDS[@]}"               "wget: 无子命令"
+
 run_test "edge: 空输入" ""
 
 _assert_empty "${_BLE_PARSE_SUBCMDS[@]}" "空输入：subcmds 应为空"
@@ -399,6 +436,71 @@ run_test "edge: 描述中含 -- 不应匹配为选项" \
 _assert_contains     "${_BLE_PARSE_SUBCMDS[@]}" "build"     "描述含--：build 正常入池"
 _assert_contains     "${_BLE_PARSE_SUBCMDS[@]}" "test"      "描述含--：test 正常入池"
 _assert_not_contains "${_BLE_PARSE_OPTS[@]}"    "--release" "描述含--：描述里的 --release 不入选项池"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _ble_filter 单元测试
+# ─────────────────────────────────────────────────────────────────────────────
+
+print "\n── _ble_filter: Pass 1（精确前缀）"
+local -a _p=("pi-claude" "pi-cat" "python" "pi" "perl")
+_ble_filter "pi" "${_p[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "pi-claude" "Pass1: pi → pi-claude"
+_assert_contains     "${_BLE_FILTERED[@]}" "pi-cat"    "Pass1: pi → pi-cat"
+_assert_contains     "${_BLE_FILTERED[@]}" "pi"        "Pass1: pi → pi（精确匹配）"
+_assert_not_contains "${_BLE_FILTERED[@]}" "python"    "Pass1: 前缀 pi 不含 python"
+_assert_not_contains "${_BLE_FILTERED[@]}" "perl"      "Pass1: 前缀 pi 不含 perl"
+
+print "\n── _ble_filter: Pass 2a（substring）"
+# "claude" 在 pi-claude 中作为子串匹配；首字母预过滤要求以 'c' 开头的候选，
+# pi-claude 不以 'c' 开头 → Pass 2a 实际上被首字母预过滤截断
+# 正确用例：needle 首字母与候选首字母一致才触发 substring
+local -a _p2a=("pi-claude" "pi-cat" "cp-claude" "curl")
+_ble_filter "cl" "${_p2a[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "cp-claude"  "Pass2a: cl(首字母c) substring → cp-claude"
+_assert_not_contains "${_BLE_FILTERED[@]}" "pi-claude"  "Pass2a: pi-claude 首字母 p ≠ c，预过滤排除"
+
+print "\n── _ble_filter: Pass 2b（head-anchored subsequence）"
+local -a _p2b=("pi-claude" "pi-cat" "python" "pi-clude")
+_ble_filter "piclaud" "${_p2b[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "pi-claude"  "Pass2b: piclaud → pi-claude"
+_assert_not_contains "${_BLE_FILTERED[@]}" "pi-cat"     "Pass2b: piclaud 不含 pi-cat（无 'laud'）"
+_assert_not_contains "${_BLE_FILTERED[@]}" "python"     "Pass2b: piclaud 不含 python"
+
+print "\n── _ble_filter: Pass 2c（pure subsequence）"
+local -a _p2c=("pi-claude" "python" "perlclude")
+_ble_filter "pclaud" "${_p2c[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "pi-claude"  "Pass2c: pclaud → pi-claude (*p*c*l*a*u*d*)"
+_assert_not_contains "${_BLE_FILTERED[@]}" "python"     "Pass2c: pclaud 不含 python（无 'claud'）"
+
+print "\n── _ble_filter: 首字母预过滤"
+local -a _p_pre=("python" "pi-claude" "apply" "pep")
+_ble_filter "py" "${_p_pre[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "python"    "首字母过滤: py → python"
+_assert_not_contains "${_BLE_FILTERED[@]}" "apply"     "首字母过滤: apply 首字母 a，不在 py 候选里"
+_assert_not_contains "${_BLE_FILTERED[@]}" "pi-claude" "首字母过滤: pi-claude 不含 'py' 前缀"
+
+print "\n── _ble_filter: word 为空时 FILTERED 为空（调用方直接用原始 pool）"
+local -a _p_empty=("foo" "bar")
+_ble_filter "" "${_p_empty[@]}"
+_assert_empty "${_BLE_FILTERED[@]}" "_ble_filter: word='' 时 FILTERED 为空"
+
+print "\n── _ble_filter: 无匹配时 FILTERED 为空"
+local -a _p_nm=("foo" "bar" "baz")
+_ble_filter "px" "${_p_nm[@]}"
+_assert_empty "${_BLE_FILTERED[@]}" "_ble_filter: 无匹配（首字母 p 但无候选以 p 开头）"
+
+print "\n── _ble_filter: glob 元字符转义（--release 含连字符）"
+local -a _p_glob=("--release" "--debug" "--output")
+_ble_filter "--rel" "${_p_glob[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "--release" "glob转义: --rel → --release"
+_assert_not_contains "${_BLE_FILTERED[@]}" "--debug"   "glob转义: --rel 不含 --debug"
+
+print "\n── _ble_filter: 路径 basename 过滤（模拟路径补全场景）"
+local -a _p_path=("fzf-ble-complete.zsh" "README.md" "DESIGN.md" "fzf-complete.sh")
+_ble_filter "fzf-b" "${_p_path[@]}"
+_assert_contains     "${_BLE_FILTERED[@]}" "fzf-ble-complete.zsh" "路径: fzf-b → fzf-ble-complete.zsh"
+_assert_not_contains "${_BLE_FILTERED[@]}" "README.md"            "路径: fzf-b 不含 README.md"
+_assert_not_contains "${_BLE_FILTERED[@]}" "fzf-complete.sh"      "路径: fzf-b 不含 fzf-complete.sh（无 '-b'）"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 结果汇总

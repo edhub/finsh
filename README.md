@@ -65,3 +65,4 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 | `fzf-ble-complete.zsh` | 唯一实现文件 |
 | `DESIGN.md` | 设计文档（架构、实现细节、Bug 历史）|
 | `AGENTS.md` | AI agent 上下文（约束清单、快速参考）|
+| `tests/test-help-parser.zsh` | `_ble_parse_help` 与 `_ble_filter` 单元测试 |
