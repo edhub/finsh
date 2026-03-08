@@ -18,7 +18,10 @@ Tab
  │
  └─ New round: reset state → collect pool → filter → show or fill
       │
-      ├─ cursor not at end of line → zle complete-word (native)
+      ├─ cursor not at end of line → mid-line completion:
+      │   strip leading non-space chars of RBUFFER (right part of current word)
+      │   → save as _FINSH_RBUF; restore when filling a candidate
+      │   (cursor at word boundary: _FINSH_RBUF = full RBUFFER; no stripping needed)
       │
       ├─ word contains /  → _finsh_try_path (glob + basename filter)
       │

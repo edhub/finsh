@@ -65,6 +65,14 @@ Every constraint below has a corresponding bug history entry in [DESIGN.md § Bu
 - Prepend `"--"` to `word`: `"bu"` → `"--bu"` → prefix-matches `--build-sea`
 - `_FINSH_PFX` is unchanged; the candidate replaces the original word directly
 
+### Mid-line completion → `_FINSH_RBUF`
+
+- Cursor can be anywhere in the line; no early-exit for `CURSOR != ${#BUFFER}`
+- At the start of each new completion round, compute `_rword` = leading non-space chars of `RBUFFER` (the right part of the word under the cursor)
+- `_FINSH_RBUF = RBUFFER[${#_rword}+1,-1]` — the text that should follow the completed word
+- Every candidate fill site must set **both** `LBUFFER` and `RBUFFER="$_FINSH_RBUF"` (show-mode fill, cycle fill, single-candidate fill, path single-candidate fill)
+- When cursor is at a word boundary (RBUFFER starts with space or is empty): `_rword=""` and `_FINSH_RBUF = RBUFFER` — no stripping, most common case
+
 ### `zle -M` message starting with `-` → [DESIGN.md § Bug History](DESIGN.md#bug-history)
 
 - When the message passed to `zle -M "msg"` starts with `-`, zle parses it as its own option and reports `bad option` (Bug 17)

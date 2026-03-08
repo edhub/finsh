@@ -59,6 +59,7 @@ typeset -gi _FINSH_TOTAL=0       # total candidates before truncation (used for 
 typeset -gi _FINSH_SHOW_MODE=0      # 1 = show-without-fill mode
 typeset -ga _FINSH_SHOW_POOL=()     # full candidate pool in show mode (for live re-filtering as user types)
 typeset -g  _FINSH_SHOW_WORD_PFX="" # filter prefix (opts-only tools need "--" prepended to the current word)
+typeset -g  _FINSH_RBUF=""          # RBUFFER to restore after filling a candidate (mid-line: strips right word part)
 
 # Output array for _finsh_filter (avoids subshell; results written directly to global array).
 typeset -ga _FINSH_FILTERED
@@ -493,6 +494,7 @@ _finsh_try_path() {
 
     if (( $#show == 1 )); then
         LBUFFER="${_prefix}${sep}${show[1]}"
+        RBUFFER="$_FINSH_RBUF"
         zle reset-prompt
         return 0
     fi
@@ -638,6 +640,7 @@ _finsh_complete() {
         _FINSH_SHOW_WORD_PFX=""
         _FINSH_IDX=1
         LBUFFER="${_FINSH_PFX}${_FINSH_CANDS[1]}"
+        RBUFFER="$_FINSH_RBUF"
         _finsh_show_candidates
         return
     fi
@@ -658,11 +661,20 @@ _finsh_complete() {
     _FINSH_CANDS=()
     _FINSH_IDX=0
     _FINSH_PFX=""
-
-    # Fall back to native completion when cursor is not at end of line
-    (( CURSOR != ${#BUFFER} )) && { zle complete-word; return }
+    _FINSH_RBUF=""
 
     local lbuf=$LBUFFER
+
+    # ── Compute the right part of the current word in RBUFFER (mid-line) ─────
+    # When the cursor is inside a word (e.g. "--dr|y-run"), RBUFFER starts with
+    # the remainder of that word ("y-run ...").  Strip those leading non-space
+    # characters so that after filling a candidate the buffer is clean.
+    # When the cursor is already at a word boundary (space or end-of-line) this
+    # simply sets _FINSH_RBUF equal to the full RBUFFER.
+    local _rword=""
+    [[ "$RBUFFER" =~ '^([^[:space:]]*)' ]] && _rword="$match[1]"
+    _FINSH_RBUF="${RBUFFER[${#_rword}+1,-1]}"
+
     local word prefix
 
     # Trailing whitespace → cursor is at the start of a new word; current word is empty
@@ -736,6 +748,7 @@ _finsh_complete() {
     # Unique candidate: fill it directly without showing a list
     if (( $#show == 1 )); then
         LBUFFER="${prefix}${show[1]}"
+        RBUFFER="$_FINSH_RBUF"
         zle reset-prompt
         return
     fi
