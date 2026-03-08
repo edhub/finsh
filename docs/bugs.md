@@ -194,3 +194,67 @@ zle -M -- "--build-sea  [--build-snapshot]  ..."
 ```
 
 修法：`zle -M` 改为 `zle -M -- "..."` 即可。规律：**凡是 `zle -M` 的消息内容可能以 `-` 开头，都应加 `--`**。
+
+---
+
+**Bug 18 — `cargo bu<Tab>` 候选里出现 `but`（描述文字里的逗号被误解析为 alias 分隔符）**
+
+现象：`cargo bu<Tab>` 候选列表为 `[build]  but`，`but` 是干扰词。
+
+根因：`cargo --help` 里有这样一行：
+
+```
+    check, c    Analyze the current package and report errors, but don't build object files
+```
+
+当时的逗号分割对整行 `_line` 做 `${(s:,:)_line}` 拆分，结果之一为 ` but don`，strip 首尾空白后剩 `but`，恰好匹配 `^[a-z][-a-z0-9]*$`，被录入 subcmds。
+
+修法：在按逗号分割之前，先剥离描述部分（aliases 与描述之间总有 2+ 空格分隔符）：
+
+```zsh
+local _trimmed="${_line##[[:space:]]#}"
+local _aliases_part="${_trimmed%%  *}"   # 只保留第一个 2-space gap 之前
+for _part in "${(s:,:)_aliases_part[@]}"; do ...
+```
+
+同时修了 `subcmds` 和 `flat` 两个分支。
+
+---
+
+**Bug 19 — `wget --no<Tab>` 漏掉 `--no-verbose` 等选项（多字符短选项不匹配）**
+
+现象：`wget --no<Tab>` 少了 `--no-verbose`、`--no-clobber`、`--inet4-only`、`--inet6-only` 等 7 个选项。
+
+根因：opts 正则的短选项前缀部分为 `(-[a-zA-Z],?[[:space:]]+)?`，只允许**单字母**短选项（如 `-V,`）。wget 有 `-nv,`、`-nc,`、`-4,`、`-6,` 等多字符 / 数字短选项，整行不匹配，`--long` 部分一同被丢弃。
+
+修法：将 `-[a-zA-Z]` 改为 `-[a-zA-Z0-9]+`，允许任意长度的短选项标识符：
+
+```zsh
+# 旧
+'^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))'
+# 新
+'^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))'
+```
+
+修后 wget 153 个选项全部覆盖，cargo/git 不受影响。
+
+---
+
+**Bug 20 — `wget -hel<Tab>` 静默无补全（_arguments 副作用污染 pool）**
+
+现象：`wget -hel<Tab>` 无任何补全，预期应填入 `--help`。
+
+根因：`_wget` 用 `_arguments` 声明了 `'*:URL:_urls'`。在 zle -C 补全上下文中，`_arguments` 会为位置参数调用 `_urls → _files → compadd`，我们的 hook 捕获到当前目录的文件名（`AGENTS.md`、`README.md` 等）。此时：
+
+1. `$#pool != 0`（pool 有文件名）→ 原条件 `$#pool == 0` 为假 → 跳过 `--help` 路径
+2. `_ble_filter "-hel" ["AGENTS.md" "README.md" ...]` → 首字母预过滤 `-*`：无文件以 `-` 开头 → pool 清空 → 静默退出
+
+修法：增加第三个进入 `--help` 路径的条件：`word` 以 `-` 开头但 pool 中没有任何 `-*` 候选（即 pool 全是非选项内容），此时丢弃 pool 并走 `--help`：
+
+```zsh
+if [[ -n "$_ble_cmd" ]] && {
+    (( $#pool == 0 )) ||
+    { [[ "$word" == -* ]] && (( ${#${(M)pool:#-*}} == 0 )) }
+}; then
+    pool=()   # 丢弃无关候选
+```

@@ -61,6 +61,16 @@ fzf-ble-complete/
 - `zle -M "msg"` 在消息以 `-` 开头时，`zle` 把消息内容解析为自己的 option，报 `bad option`（Bug 17）
 - 规律：**凡是 `zle -M` 的消息内容可能以 `-` 开头，都应写 `zle -M -- "msg"`**
 
+### 逗号列表解析 → [DESIGN.md § Bug 18](DESIGN.md#bug-18)
+
+- 按逗号分割前必须先剥离描述：`_aliases_part="${_trimmed%%  *}"`（Bug 18）
+- 否则描述文字里的逗号（如 `errors, but don't...`）会产生 `but` 等干扰词
+
+### opts 正则短选项部分 → [DESIGN.md § Bug 19](DESIGN.md#bug-19)
+
+- 短选项前缀用 `-[a-zA-Z0-9]+`，允许多字符短选项（`-nv,` `-4,` 等）（Bug 19）
+- 旧的 `-[a-zA-Z]` 只匹配单字母，导致 wget 等工具丢失多字符短选项对应的 `--long` 选项
+
 ### 历史自动建议 → [DESIGN.md § 历史自动建议](DESIGN.md#历史自动建议)
 
 - 必须包装 `accept-line`，`zle-line-finish` 时序太晚（Bug 14）

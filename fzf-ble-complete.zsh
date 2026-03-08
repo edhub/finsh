@@ -106,7 +106,12 @@ _ble_parse_help() {
         subcmds)
             # 逗号列表（npm/cargo 风格："  build, b  Compile..."）
             if [[ "$_line" =~ '^[[:space:]]{1,8}[a-z][-a-z0-9]*,' ]]; then
-                for _part in "${(s:,:)_line[@]}"; do
+                # 先剥离描述（aliases 与描述之间有 2+ 空格间距），再按逗号分割；
+                # 避免描述文字中的逗号被误当成 alias 分隔符
+                # 例：`    check, c    Analyze...errors, but don't...` → 只取 `check, c`
+                local _trimmed="${_line##[[:space:]]#}"
+                local _aliases_part="${_trimmed%%  *}"
+                for _part in "${(s:,:)_aliases_part[@]}"; do
                     _part="${_part##[[:space:]]#}"
                     _part="${_part%%[[:space:]]*}"
                     [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _BLE_PARSE_SUBCMDS+=("$_part")
@@ -119,7 +124,7 @@ _ble_parse_help() {
 
         opts)
             # --flag 行，带或不带 -x, 前缀
-            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
+            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                 _BLE_PARSE_OPTS+=("--$match[4]")
             fi
             ;;
@@ -129,11 +134,13 @@ _ble_parse_help() {
         flat)
             # 启发式解析（无 section 工具，如 git）
             # --flag 行
-            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
+            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                 _BLE_PARSE_OPTS+=("--$match[4]")
             # 逗号列表
             elif [[ "$_line" =~ '^[[:space:]]{2,8}[a-z][-a-z0-9]*,' ]]; then
-                for _part in "${(s:,:)_line[@]}"; do
+                local _trimmed="${_line##[[:space:]]#}"
+                local _aliases_part="${_trimmed%%  *}"
+                for _part in "${(s:,:)_aliases_part[@]}"; do
                     _part="${_part##[[:space:]]#}"
                     _part="${_part%%[[:space:]]*}"
                     [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _BLE_PARSE_SUBCMDS+=("$_part")
@@ -308,7 +315,18 @@ _fzf_ble_complete() {
 
     # ── 路径补全 ──────────────────────────────────────────────────────────────
     if [[ "$word" == */* ]]; then
-        local dir="${word:h}" base="${word:t}"
+        local dir base
+        if [[ "$word" == */ ]]; then
+            # 末尾 / 代表用户明确要补全目录内容（如 ls ~/dev/）
+            # 不能用 :h/:t —— ~/dev/:h="~", :t="dev"，会丢掉目录层级
+            dir="${word%/}"   # 去掉尾 /，保留完整目录路径
+            base=""
+        else
+            dir="${word:h}"
+            base="${word:t}"
+        fi
+        # base 不足 2 个字符时不触发（含 trailing-slash 的 base="" 情况）
+        (( ${#base} >= 2 )) || return
         local xdir="${dir/#\~/$HOME}"   # 展开 ~ （双引号内 ~ 不展开，替换前缀）
         local sep="${dir%/}/"           # 规范化分隔符：去掉末尾 / 再加回，避免 dir="/" 时双斜杠
         local xbase="${xdir%/}"         # 去掉末尾 /，防止 "/" → "//" 路径拼接问题
@@ -344,6 +362,9 @@ _fzf_ble_complete() {
         _ble_show_candidates
         return
     fi
+
+    # 命令名 / 子命令 / 选项补全：word 不足 2 个字符时不触发
+    (( ${#word} >= 2 )) || return
 
     local -a pool=()
     local _ble_registered=0   # 标记是否有注册补全函数（影响 pool 空时的回退策略）
@@ -384,12 +405,19 @@ _fzf_ble_complete() {
         fi
 
         # ── compadd 未能捕获 或 无注册补全函数：解析 $cmd --help ─────────────
-        # 两种情况都走此路径：
+        # 三种情况都走此路径：
         #   ① 无注册补全函数（如 zig、hx 安装前）
         #   ② 有注册函数但 hook 为空——最常见原因是补全函数使用了 _arguments，
         #      其底层 comparguments builtin 绕过了 function-level compadd hook
         #      （典型例子：_hx 用 _arguments -C，hx 选项无法被捕获）
-        if (( $#pool == 0 )) && [[ -n "$_ble_cmd" ]]; then
+        #   ③ word 以 - 开头（用户想补选项），但 hook 捕获到的全是文件/URL 等非选项候选
+        #      （典型例子：_wget 的 _arguments 调用了 _urls→_files→compadd，
+        #       捕获到当前目录文件名；这些文件名全不以 - 开头，对选项补全毫无用处）
+        if [[ -n "$_ble_cmd" ]] && {
+            (( $#pool == 0 )) ||
+            { [[ "$word" == -* ]] && (( ${#${(M)pool:#-*}} == 0 )) }
+        }; then
+            pool=()   # 丢弃无关候选（如文件名），准备用 --help 结果覆盖
             local -a _ble_help_words=()
             local _ble_w
             for _ble_w in ${(Az)prefix}; do
