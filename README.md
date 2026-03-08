@@ -8,7 +8,13 @@ Once you've used it, going back to zsh's plain Tab feels like something's missin
 [ble.sh](https://github.com/akinomyoga/ble.sh) proved that replicating this experience in Bash is possible.
 So **finsh** was born — bringing the same completion philosophy to zsh users on macOS.
 
-> 中文文档：[README.zh.md](README.zh.md)
+---
+
+## Contributing
+
+This is a side project maintained in spare time. Issues and PRs may receive slow responses.
+
+If you hit a bug or need a feature, the recommended workflow is to fork the repo and let an AI agent make the changes for you — the codebase is small enough that this works very well. [pi-agent](https://github.com/mariozechner/pi) with Claude (Sonnet or Opus) works great.
 
 ---
 
@@ -158,5 +164,17 @@ All passes pre-filter by first letter before running. Passes degrade in order; t
 | File | Description |
 |------|-------------|
 | `finsh.zsh` | Single implementation file |
-| `DESIGN.md` | Design document (architecture, implementation details, bug history) |
+| `DESIGN.md` | Architecture, key mechanisms, bug history |
+| `AGENTS.md` | Modification traps and syntax pitfalls (for contributors and AI agents) |
 | `tests/test-help-parser.zsh` | Unit tests for `_finsh_parse_help` and `_finsh_filter` |
+
+---
+
+## Configuration
+
+Set these variables in `~/.zshrc` **before** sourcing `finsh.zsh`:
+
+```zsh
+_FINSH_MAX_CANDS=20   # max candidates to display / cycle through (0 = unlimited)
+source ~/.zsh/plugins/finsh.zsh
+```

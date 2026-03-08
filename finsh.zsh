@@ -1,35 +1,38 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # finsh.zsh — Fish-inspired fuzzy tab completion for zsh
 #
-# 灵感来源：Fish shell 的补全体验 + ble.sh 的实现思路
-# 核心思路：在 ZLE 层自行收集原始候选，完全绕过 zsh 的前缀过滤截断
+# Inspired by Fish shell's completion UX + ble.sh's implementation approach.
+# Core idea: collect raw candidates at the ZLE layer, bypassing zsh's prefix
+# filtering truncation entirely.
 #
-# 匹配优先级（逐级降级，命中即停止）：
-#   Pass 1  – 精确前缀              "pi"      → pi-claude
-#   Pass 2a – substring             "claude"  → pi-claude
-#   Pass 2b – head-anchored subseq  "piclaud" → pi-claude  (p 锚定，iclaud ⊆ i-claude)
-#   Pass 2c – pure subsequence      "pclaud"  → pi-claude  (*p*c*l*a*u*d*)
+# Matching priority (descending; first match wins):
+#   Pass 1  – exact prefix              "pi"      → pi-claude
+#   Pass 2a – substring                 "claude"  → pi-claude
+#   Pass 2b – head-anchored subsequence "piclaud" → pi-claude  (p anchored, iclaud ⊆ i-claude)
+#   Pass 2c – pure subsequence          "pclaud"  → pi-claude  (*p*c*l*a*u*d*)
 #
-# 补全行为：
-#   首次 Tab  – fuzzy 过滤 → zle -M 展示候选列表，不填入（show 模式）
-#   继续输入  – 实时重过滤候选列表（show 模式保持）
-#   再次 Tab  – 填入第一候选，进入 cycle 模式
-#   cycle Tab – 循环切换到下一个候选（环绕）
-#   Shift+Tab – 原生 zsh 补全（保留上下文感知行为）
-#   其他按键  – 接受当前候选，列表消失
+# Completion behaviour:
+#   First Tab   – fuzzy filter → display candidate list via zle -M, no fill (show mode)
+#   Type more   – live re-filter candidate list (remains in show mode)
+#   Tab again   – fill first candidate, enter cycle mode
+#   Cycle Tab   – cycle to next candidate (wraps around)
+#   Shift+Tab   – native zsh completion (context-aware behaviour preserved)
+#   Other keys  – accept current candidate, list disappears
 #
-# 补全场景：
-#   命令名   – 从 commands / functions / aliases / builtins 收集
-#   子命令   – 有注册补全函数时用 zle -C 建立正规 completion context，hook compadd 截获
-#            – 无注册补全函数时尝试解析 $cmd --help 输出（状态机）
-#   路径     – glob 当前目录层，按文件名部分过滤
+# Completion scenarios:
+#   Command name – collected from commands / functions / aliases / builtins
+#   Subcommands  – with a registered completion function: use zle -C to establish
+#                  a proper completion context, hook compadd to capture candidates
+#                – without a registered completion function: parse $cmd --help output (state machine)
+#   Paths        – glob current directory level, filter by filename component
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── 自动初始化补全系统 ────────────────────────────────────────────────────────
-# 若 compinit 尚未运行（$_comps 为空），自动完成初始化。
-# macOS 上自动将 Homebrew 补全目录（_docker、_gh 等）加入 fpath。
+# ── Auto-initialise the completion system ────────────────────────────────────
+# If compinit hasn't run yet ($_comps is empty), initialise automatically.
+# On macOS, the Homebrew completion directory (_docker, _gh, etc.) is added to
+# fpath automatically.
 () {
-    [[ -n "${_comps-}" ]] && return   # compinit 已运行，跳过
+    [[ -n "${_comps-}" ]] && return   # compinit already ran, skip
     if [[ "$OSTYPE" == darwin* ]]; then
         local _site="${HOMEBREW_PREFIX:-/opt/homebrew}/share/zsh/site-functions"
         [[ -d "$_site" ]] && (( ! ${fpath[(I)$_site]} )) && fpath=("$_site" $fpath)
@@ -38,85 +41,87 @@
     compinit -d ~/.zcompdump
 }
 
-# compadd hook 的全局暂存区
-# （completion context 内调用的函数无法访问外层 widget 的 local 变量）
+# Global staging area for the compadd hook.
+# (Functions called inside a completion context cannot access local variables
+# from the outer widget.)
 typeset -ga _FINSH_POOL
 
-# 补全状态（跨 widget 调用保持）
-# 第 1 次 Tab：show 模式——展示列表不填入；继续输入→实时过滤；
-# 再次 Tab→填入第一候选（cycle 模式）
-typeset -ga _FINSH_CANDS   # 当前补全的候选列表（已截断到 _FINSH_MAX_CANDS）
-typeset -gi _FINSH_IDX=0   # 当前选中索引（1-based；show 模式下为 0）
-typeset -g  _FINSH_PFX=""  # 候选词之前的内容（LBUFFER 前缀，show 模式期间固定不变）
-typeset -g  _FINSH_WORD="" # 发起补全时用户输入的原始词
-typeset -gi _FINSH_MAX_CANDS=20  # 最大展示 / tab 循环候选数（0 = 不限制）
-typeset -gi _FINSH_TOTAL=0       # 截断前的候选总数（用于显示 "+N more" 提示）
+# Completion state (persists across widget invocations).
+# First Tab: show mode — display list without filling; continue typing → live
+# filter; Tab again → fill first candidate (cycle mode).
+typeset -ga _FINSH_CANDS   # current candidate list (truncated to _FINSH_MAX_CANDS)
+typeset -gi _FINSH_IDX=0   # current selection index (1-based; 0 in show mode)
+typeset -g  _FINSH_PFX=""  # content before the candidate word (fixed LBUFFER prefix during show mode)
+typeset -gi _FINSH_MAX_CANDS=20  # max candidates to display / cycle through (0 = unlimited)
+typeset -gi _FINSH_TOTAL=0       # total candidates before truncation (used for "+N more" hint)
 
-# show 模式状态（首次 Tab 进入，再次 Tab 退出并填入）
-typeset -gi _FINSH_SHOW_MODE=0      # 1=show-without-fill 模式
-typeset -ga _FINSH_SHOW_POOL=()     # show 模式完整候选池（供用户继续输入时重过滤）
-typeset -g  _FINSH_SHOW_WORD_PFX="" # 过滤前缀（opts-only 工具需在当前词前加 "--"）
+# Show-mode state (entered on first Tab, exited and filled on second Tab).
+typeset -gi _FINSH_SHOW_MODE=0      # 1 = show-without-fill mode
+typeset -ga _FINSH_SHOW_POOL=()     # full candidate pool in show mode (for live re-filtering as user types)
+typeset -g  _FINSH_SHOW_WORD_PFX="" # filter prefix (opts-only tools need "--" prepended to the current word)
 
-# _finsh_filter 的输出数组（避免 subshell，直接在全局数组中写结果）
+# Output array for _finsh_filter (avoids subshell; results written directly to global array).
 typeset -ga _FINSH_FILTERED
 
-# --help 输出缓存（key=命令路径拼接，value=help 文本；同一 session 只解析一次）
+# --help output cache (key=joined command words, value=help text; parsed at most once per session).
 typeset -gA _FINSH_HELP_CACHE
 
-# _finsh_parse_help 的输出数组（避免 subshell）
-typeset -ga _FINSH_PARSE_SUBCMDS   # 解析出的子命令列表
-typeset -ga _FINSH_PARSE_OPTS      # 解析出的 --flag 列表
+# Output arrays for _finsh_parse_help (avoids subshell).
+typeset -ga _FINSH_PARSE_SUBCMDS   # parsed subcommand list
+typeset -ga _FINSH_PARSE_OPTS      # parsed --flag list
 
-# 历史自动建议状态
-typeset -g _FINSH_SUGGESTION=""         # 当前建议后缀（POSTDISPLAY 内容）
-typeset -g _FINSH_SUGGESTION_NEEDLE=""  # 上次搜索的 needle（避免重复搜索）
+# History autosuggestion state.
+typeset -g _FINSH_SUGGESTION=""         # current suggestion suffix (POSTDISPLAY content)
+typeset -g _FINSH_SUGGESTION_NEEDLE=""  # last searched needle (avoids redundant searches)
 
-# _finsh_collect_subcmd_pool 的输出变量（避免 subshell）
-typeset -ga _FINSH_POOL_TMP=()   # 收集到的候选池
-typeset -gi _FINSH_REG_TMP=0     # 是否有注册补全函数（0/1）
-typeset -g  _FINSH_WORD_TMP=""   # 可能被修改的 word（opts-only 工具补 "--" 前缀）
+# Output variables for _finsh_collect_subcmd_pool (avoids subshell).
+typeset -ga _FINSH_POOL_TMP=()   # collected candidate pool
+typeset -gi _FINSH_REG_TMP=0     # whether a registered completion function exists (0/1)
+typeset -g  _FINSH_WORD_TMP=""   # word possibly modified by the collector (opts-only tools prepend "--")
 
-# ── --help 输出解析 ────────────────────────────────────────────────────────────
-# 输入：$1 = --help 的原始输出文本
-# 输出：结果写入全局数组 _FINSH_PARSE_SUBCMDS（子命令）和 _FINSH_PARSE_OPTS（--flag 选项）
+# ── --help output parser ──────────────────────────────────────────────────────
+# Input:  $1 = raw --help output text
+# Output: results written to global arrays _FINSH_PARSE_SUBCMDS (subcommands)
+#         and _FINSH_PARSE_OPTS (--flag options)
 #
-# 解析策略：单次扫描状态机，先分类后提取。
+# Parsing strategy: single-pass state machine — classify section, then extract.
 #
-#   初始状态：flat（启发式，适用于无 section 的工具，如 git）
+#   Initial state: flat (heuristic, suitable for tools without sections, e.g. git)
 #
-#   遇到以下 section header（行长 ≤ 40 chars、首字母开头）时切换状态：
-#     *commands* / *subcommands* → subcmds（提取缩进子命令）
-#     *options*  / *flags*       → opts   （提取 --flag）
-#     纯大写 USAGE: / ARGS: 等    → other  （整段跳过）
+#   State transitions on section headers (line length ≤ 40 chars, starts with a letter):
+#     *commands* / *subcommands* → subcmds (extract indented subcommands)
+#     *options*  / *flags*       → opts    (extract --flags)
+#     all-caps USAGE: / ARGS: …  → other   (skip entire section)
 #
-#   行长上限 40 用于过滤掉长描述句（如 git 的
-#   "These are common Git commands used in various situations:"），
-#   避免把句子里的 "commands" 当成 section header 处罚。
+#   The line-length limit of 40 filters out long descriptive sentences (e.g. git's
+#   "These are common Git commands used in various situations:"), preventing the
+#   word "commands" inside a sentence from being mistaken for a section header.
 #
-#   各状态提取规则：
-#     subcmds – 1-8 空格缩进 + 小写首词（section 限定，不需要额外启发）
-#               逗号列表（npm/cargo 的 "build, b  compile" 风格）同样支持
-#     opts    – --flag 行（带或不带 -x, 前缀）
-#     other   – 跳过全部行
-#     flat    – 同时提取 --flag 和子命令
-#               子命令要求 2-8 空格缩进 + 名称后 2+ 空格间距，
-#               过滤 "  hx [FLAGS]..." 类 USAGE 行（名称后只有 1 空格）
+#   Per-state extraction rules:
+#     subcmds – 1-8 space indent + lowercase first word (section already scopes it;
+#               simple rule suffices)
+#               comma lists ("build, b  compile" style from npm/cargo) are also supported
+#     opts    – --flag lines (with or without a -x, short-option prefix)
+#     other   – skip all lines
+#     flat    – extract both --flags and subcommands simultaneously
+#               subcommands require 2-8 space indent + 2+ space gap after the name,
+#               to filter out "  hx [FLAGS]..." USAGE lines (only 1 space after name)
 #
-#   已验证工具：
+#   Verified tools:
 #     section-based: zig(2sp)  cargo(4sp,comma)  npm(comma)
 #                    docker(multi-section)  hx(FLAGS:/USAGE:)
-#                    pi/cobra（每行带程序名前缀："  pi install <args>"）
-#     flat:          git(3sp, 无 section header)
+#                    pi/cobra (each line prefixed with program name: "  pi install <args>")
+#     flat:          git(3sp, no section headers)
 #
-#   cobra/urfave 风格（$2 传入命令 basename）：
-#     Commands 区块每行格式为 "  <progname> <subcmd> [args...]"
-#     当首词等于 $_cmdname 时，取第二个词作为子命令；
-#     跳过 "<placeholder>" 格式（如 "pi <command> --help"）
+#   cobra/urfave style ($2 = command basename):
+#     Commands section lines have the format "  <progname> <subcmd> [args...]".
+#     When the first word equals $_cmdname, take the second word as the subcommand;
+#     skip "<placeholder>" format (e.g. "pi <command> --help").
 _finsh_parse_help() {
     emulate -L zsh
     setopt extendedglob
     local _help_out="$1"
-    local _cmdname="${2:t}"  # 命令 basename，用于识别 cobra 风格的 "  pi subcmd" 格式
+    local _cmdname="${2:t}"  # command basename, used to recognise cobra-style "  pi subcmd" lines
     _FINSH_PARSE_SUBCMDS=()
     _FINSH_PARSE_OPTS=()
     [[ -z "$_help_out" ]] && return
@@ -126,15 +131,15 @@ _finsh_parse_help() {
     while IFS= read -r _line; do
 
         # ── Section header detection ─────────────────────────────────────────
-        # 条件：行长 ≤ 40（过滤长句）且首字符为字母
+        # Condition: line length ≤ 40 (filter out long sentences) and starts with a letter
         if (( ${#_line} <= 40 )) && [[ "$_line" =~ '^[[:alpha:]]' ]]; then
-            _lc="${_line:l}"   # 转小写，实现大小写无关匹配
+            _lc="${_line:l}"   # lowercase for case-insensitive matching
             if   [[ "$_lc" =~ '(sub)?commands?[[:space:]]*:' ]]; then
                 _section="subcmds"; continue
             elif [[ "$_lc" =~ '(options?|flags?)[[:space:]]*:' ]]; then
                 _section="opts";    continue
             elif [[ "$_line" =~ '^[A-Z][A-Z -]*:' ]]; then
-                # 纯大写 header（USAGE: ARGS: EXAMPLES: 等）
+                # All-caps header (USAGE: ARGS: EXAMPLES: etc.)
                 _section="other";   continue
             fi
         fi
@@ -143,11 +148,12 @@ _finsh_parse_help() {
         case "$_section" in
 
         subcmds)
-            # 逗号列表（npm/cargo 风格："  build, b  Compile..."）
+            # Comma list (npm/cargo style: "  build, b  Compile...")
             if [[ "$_line" =~ '^[[:space:]]{1,8}[a-z][-a-z0-9]*,' ]]; then
-                # 先剥离描述（aliases 与描述之间有 2+ 空格间距），再按逗号分割；
-                # 避免描述文字中的逗号被误当成 alias 分隔符
-                # 例：`    check, c    Analyze...errors, but don't...` → 只取 `check, c`
+                # Strip the description (aliases and description are separated by 2+ spaces),
+                # then split on commas — avoids commas inside the description text being
+                # treated as alias separators.
+                # e.g. `    check, c    Analyze...errors, but don't...` → take only `check, c`
                 local _trimmed="${_line##[[:space:]]#}"
                 local _aliases_part="${_trimmed%%  *}"
                 for _part in "${(s:,:)_aliases_part[@]}"; do
@@ -155,32 +161,34 @@ _finsh_parse_help() {
                     _part="${_part%%[[:space:]]*}"
                     [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
                 done
-            # cobra 风格：首词是程序名，消费整行；若第二词是合法子命令则提取，
-            # 否则（"<placeholder>" 格式，如 "pi <command> --help"）静默跳过
+            # cobra style: first word is the program name; consume the whole line.
+            # If the second word is a valid subcommand, extract it; otherwise (e.g.
+            # "<placeholder>" format like "pi <command> --help") silently skip.
             elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{1,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
                 [[ "$_line" =~ '^[[:space:]]{1,8}'"${(b)_cmdname}"'[[:space:]]+([a-z][-a-z0-9]*)' ]] && \
                     _FINSH_PARSE_SUBCMDS+=("$match[1]")
-            # 普通行：1-8 空格缩进 + 小写首词（section 已限定范围，规则简单）
+            # Plain line: 1-8 space indent + lowercase first word (section already scopes it)
             elif [[ "$_line" =~ '^[[:space:]]{1,8}([a-z][-a-z0-9]*)' ]]; then
                 _FINSH_PARSE_SUBCMDS+=("$match[1]")
             fi
             ;;
 
         opts)
-            # --flag 行，带或不带 -x, 前缀（-[a-zA-Z0-9]+ 支持 -nv, -nc, -4 等多字符短选项）
+            # --flag lines, with or without a -x, short-option prefix
+            # (-[a-zA-Z0-9]+ supports multi-char short options like -nv, -nc, -4)
             if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                 _FINSH_PARSE_OPTS+=("--$match[4]")
             fi
             ;;
 
-        other) ;;   # USAGE: / ARGS: 等无关 section，整段跳过
+        other) ;;   # USAGE: / ARGS: and other irrelevant sections — skip entirely
 
         flat)
-            # 启发式解析（无 section 工具，如 git）
-            # --flag 行
+            # Heuristic parsing (tools without sections, e.g. git)
+            # --flag lines
             if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                 _FINSH_PARSE_OPTS+=("--$match[4]")
-            # 逗号列表
+            # Comma list
             elif [[ "$_line" =~ '^[[:space:]]{2,8}[a-z][-a-z0-9]*,' ]]; then
                 local _trimmed="${_line##[[:space:]]#}"
                 local _aliases_part="${_trimmed%%  *}"
@@ -189,12 +197,13 @@ _finsh_parse_help() {
                     _part="${_part%%[[:space:]]*}"
                     [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
                 done
-            # cobra 风格：首词是程序名，消费整行；若第二词是合法子命令（后接 2+ 空格）则提取
+            # cobra style: first word is the program name; if second word is a valid
+            # subcommand (followed by 2+ spaces) extract it
             elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
                 [[ "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]+([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]] && \
                     _FINSH_PARSE_SUBCMDS+=("$match[1]")
-            # 普通行：2-8 空格缩进 + 名称后 2+ 空格间距
-            # 2+ 空格间距用于排除 "  cmd [ARG]..." 类 USAGE 行（名称后只有 1 空格）
+            # Plain line: 2-8 space indent + 2+ space gap after the name.
+            # The 2+ space gap filters out "  cmd [ARG]..." USAGE lines (only 1 space after name).
             elif [[ "$_line" =~ '^[[:space:]]{2,8}([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]]; then
                 _FINSH_PARSE_SUBCMDS+=("$match[1]")
             fi
@@ -204,24 +213,32 @@ _finsh_parse_help() {
     done <<< "$_help_out"
 }
 
-# ── Man page 解析 ────────────────────────────────────────────────────────────
-# 针对无 --help 或 --help 无结果时的兜底；被 _finsh_collect_subcmd_pool 调用。
-# 输出写入全局 _FINSH_PARSE_SUBCMDS / _FINSH_PARSE_OPTS（与 _finsh_parse_help 共用变量）。
+# ── Man page parser ───────────────────────────────────────────────────────────
+# Last-resort fallback when --help is absent or yields no results;
+# called by _finsh_collect_subcmd_pool.
+# Output is written to global _FINSH_PARSE_SUBCMDS / _FINSH_PARSE_OPTS
+# (shared with _finsh_parse_help).
 #
-# 与 --help 解析的核心差异：
-#   section header：无冒号全大写（COMMANDS、OPTIONS、CLIENTS AND SESSIONS 等）
-#   子命令提取：name 后接 " [" 或行尾，过滤 "target-session is tried as..." 类描述行
-#   选项提取：双横杠 --flag（有 OPTIONS section 时）＋ 单横杠 -x（任意 section 均检测）
+# Key differences from the --help parser:
+#   Section headers: all-uppercase without a colon (COMMANDS, OPTIONS,
+#                    CLIENTS AND SESSIONS, etc.)
+#   Subcommand extraction: name followed by " [" or end-of-line, to filter
+#                          out descriptive lines like "target-session is tried as..."
+#   Option extraction: double-dash --flag (when an OPTIONS section exists)
+#                      + single-dash -x (detected in any section)
 #
-# BSD/macOS 工具（ssh、cp、find 等）无独立 OPTIONS section，选项嵌在 DESCRIPTION 内：
-#   格式：5 空格缩进 + -x + 1+ 空格 + 描述（如 "     -4      Forces ssh to use IPv4"）
-#   在 other state 检测此模式即可收集，无需专门 section。
+# BSD/macOS tools (ssh, cp, find, etc.) have no dedicated OPTIONS section;
+# options are embedded in DESCRIPTION:
+#   Format: 5-space indent + -x + 1+ spaces + description
+#           (e.g. "     -4      Forces ssh to use IPv4")
+#   Detecting this pattern in the "other" state is sufficient to collect them.
 #
-# 已验证工具：
-#   有 OPTIONS section: grep(GNU)、less
-#   无 OPTIONS section: ssh(-4,-6,-A...)  cp(-H,-L,-P,-R...)
-#   有 COMMANDS section: (需工具有明确 COMMANDS 节，如部分自定义 CLI)
-#   不适用 (命令散布于子 section): tmux — 建议改用 tmux list-commands
+# Verified tools:
+#   With OPTIONS section: grep (GNU), less
+#   Without OPTIONS section: ssh (-4,-6,-A,...)  cp (-H,-L,-P,-R,...)
+#   With COMMANDS section: custom CLIs that have a dedicated COMMANDS section
+#   Not applicable (commands spread across sub-sections): tmux —
+#     use `tmux list-commands` instead
 _finsh_parse_man() {
     emulate -L zsh
     setopt extendedglob
@@ -235,8 +252,8 @@ _finsh_parse_man() {
 
     while IFS= read -r _line; do
 
-        # ── Section header：无冒号全大写，行长 ≤ 40 ──────────────────────────
-        # 例：COMMANDS、OPTIONS、CLIENTS AND SESSIONS（长度 20 ≤ 40，但不含 commands）
+        # ── Section header: all-uppercase, no colon, line length ≤ 40 ────────
+        # e.g. COMMANDS, OPTIONS, CLIENTS AND SESSIONS (length 20 ≤ 40)
         if [[ "$_line" =~ '^[A-Z][A-Z0-9 -]*$' ]] && (( ${#_line} <= 40 )); then
             _lc="${_line:l}"
             if   [[ "$_lc" =~ '(sub)?commands?' ]]; then _section="subcmds"
@@ -249,29 +266,31 @@ _finsh_parse_man() {
         case "$_section" in
 
         subcmds)
-            # 3-12 空格缩进 + 小写连字符名 + " [" 或行尾
-            # " [" 要求：过滤 "     target-session is tried as, in order:" 类描述行
-            # 实践：tmux man page 里真实命令条目形如 "     attach-session [-dErx] ..."
+            # 3-12 space indent + lowercase-hyphen name + " [" or end-of-line.
+            # Requiring " [": filters out descriptive lines like
+            # "     target-session is tried as, in order:".
+            # Real tmux man page command entries look like:
+            # "     attach-session [-dErx] ..."
             if [[ "$_line" =~ '^[[:space:]]{3,12}([a-z][-a-z0-9]*)( \[|$)' ]]; then
                 _FINSH_PARSE_SUBCMDS+=("$match[1]")
             fi
             ;;
 
         opts)
-            # 长选项（带或不带 -x, 短选项前缀）
+            # Long options (with or without a -x, short-option prefix)
             if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
                 _FINSH_PARSE_OPTS+=("--$match[4]")
-            # 单横杠短选项（1-2 字符，后接 1+ 空格）
+            # Single-dash short options (1-2 chars, followed by 1+ spaces)
             elif [[ "$_line" =~ '^[[:space:]]{3,12}(-[a-zA-Z0-9][a-zA-Z0-9]?)[[:space:]]+' ]]; then
                 _FINSH_PARSE_OPTS+=("$match[1]")
             fi
             ;;
 
         other)
-            # BSD 工具选项嵌在 DESCRIPTION 内（ssh、cp 等无独立 OPTIONS section）
-            # 模式：3-12 空格缩进 + -x 或 -xy（1-2 字符） + 1+ 空格
-            # 例：ssh "     -4      Forces..."  cp "     -H    If the -R option..."
-            # 注意：-b bind_address（1 空格）也被捕获（选项+参数名格式）
+            # BSD tools embed options in DESCRIPTION (ssh, cp, etc. have no OPTIONS section).
+            # Pattern: 3-12 space indent + -x or -xy (1-2 chars) + 1+ spaces.
+            # e.g. ssh "     -4      Forces..."  cp "     -H    If the -R option..."
+            # Note: -b bind_address (1 space) is also captured (option + argument-name format).
             if [[ "$_line" =~ '^[[:space:]]{3,12}(-[a-zA-Z0-9][a-zA-Z0-9]?)[[:space:]]+' ]]; then
                 _FINSH_PARSE_OPTS+=("$match[1]")
             fi
@@ -281,9 +300,9 @@ _finsh_parse_man() {
     done <<< "$_man_out"
 }
 
-# ── 多级过滤函数 ──────────────────────────────────────────────────────────────
-# 结果写入全局 _FINSH_FILTERED，避免 $(...) subshell 开销。
-# word 为空时 _FINSH_FILTERED 置空，调用方应直接使用原始 pool。
+# ── Multi-pass filter ─────────────────────────────────────────────────────────
+# Results are written to global _FINSH_FILTERED to avoid $(...) subshell overhead.
+# When word is empty, _FINSH_FILTERED is cleared; the caller should use the raw pool directly.
 _finsh_filter() {
     emulate -L zsh
     local word="$1"; shift
@@ -292,15 +311,16 @@ _finsh_filter() {
 
     [[ -z "$word" ]] && return
 
-    # 首字母预过滤：所有 pass 都要求候选首字母与 word[1] 相同
-    # 避免纯 subsequence 命中大量不相关候选（如 *p*i*c*l*i* 匹配整个命令池）
+    # First-letter pre-filter: all passes require the candidate's first letter to
+    # match word[1], preventing pure subsequence from matching large unrelated pools
+    # (e.g. *p*i*c*l*i* hitting the entire command list).
     pool=( ${(M)pool:#${(b)word[1]}*} )
     (( $#pool )) || return
 
-    local w="${(b)word}"   # 转义 glob 元字符，做字面匹配
+    local w="${(b)word}"   # escape glob metacharacters for literal matching
     local -a r
 
-    # Pass 1 ── 精确前缀
+    # Pass 1 ── exact prefix
     r=( ${(M)pool:#${~w}*} )
     if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
@@ -308,7 +328,7 @@ _finsh_filter() {
     r=( ${(M)pool:#*${~w}*} )
     if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
-    # Pass 2b ── head-anchored subsequence（首字母字面匹配，其余 subsequence）
+    # Pass 2b ── head-anchored subsequence (first letter literal, rest subsequence)
     local tail="*" i
     for (( i = 2; i <= $#word; i++ )); do tail+="${(b)word[i]}*"; done
     r=()
@@ -325,9 +345,9 @@ _finsh_filter() {
     _FINSH_FILTERED=( ${(M)pool:#${~seq}} )
 }
 
-# ── 候选列表展示 ──────────────────────────────────────────────────────────────
-# 用 zle -M 在提示符下方展示所有候选；当前项用 [方括号] 标记。
-# 超过终端宽度时自动换行。
+# ── Candidate list display ────────────────────────────────────────────────────
+# Shows all candidates below the prompt using zle -M; the current item is
+# marked with [square brackets]. Long lines wrap automatically at terminal width.
 _finsh_show_candidates() {
     emulate -L zsh
     local cols=${COLUMNS:-80}
@@ -338,7 +358,7 @@ _finsh_show_candidates() {
         item_vis_len=${#_FINSH_CANDS[$i]}
         if (( i == _FINSH_IDX )); then
             item="[${_FINSH_CANDS[$i]}]"
-            (( item_vis_len += 2 ))   # 两个方括号各占 1 列
+            (( item_vis_len += 2 ))   # two brackets each occupy 1 column
         else
             item="${_FINSH_CANDS[$i]}"
         fi
@@ -357,7 +377,7 @@ _finsh_show_candidates() {
     done
     [[ -n "$line" ]] && out+=("$line")
 
-    # 若候选被截断，在末尾追加提示
+    # Append a hint if the candidate list was truncated
     if (( _FINSH_TOTAL > $#_FINSH_CANDS )); then
         local _more="(+$(( _FINSH_TOTAL - $#_FINSH_CANDS )) more)"
         if (( $#out )); then
@@ -370,37 +390,41 @@ _finsh_show_candidates() {
     zle -M -- "${(j:\n:)out}"
 }
 
-# ── compadd 捕获实现 ───────────────────────────────────────────────────────────
-# 必须定义在顶层（全局），供 zle -C 创建的 completion widget 调用。
+# ── compadd capture implementation ───────────────────────────────────────────
+# Must be defined at the top level (global scope) so that the completion widget
+# created by zle -C can call it.
 #
-# 关键：compadd 只有在 zle -C 建立的 completion context 内才能被函数覆盖；
-# 从普通 widget 直接调 `zle complete-word` 时，补全系统走 C 层，跳过函数查找。
+# Key point: compadd can only be overridden by a function inside a completion
+# context established with zle -C. Calling `zle complete-word` directly from a
+# normal widget goes through the C layer and skips function lookup.
 _finsh_capture() {
     emulate -L zsh
-    # 在 completion context 内覆盖 compadd，捕获候选词到全局暂存区
-    # 注意：不调用 builtin compadd，避免候选写入 zsh completion buffer，
-    # 否则 completion context 退出后 zsh 会触发 "do you wish to see all N possibilities?" 提示。
-    # 始终 return 0（模拟成功），防止补全函数走 fallback 分支漏掉候选。
+    # Override compadd inside the completion context to capture candidates into
+    # the global staging area. We do NOT call builtin compadd — doing so would
+    # write candidates into zsh's completion buffer, causing zsh to prompt
+    # "do you wish to see all N possibilities?" after the context exits.
+    # Always return 0 (simulate success) so completion functions don't fall
+    # back to alternative branches and miss candidates.
     function compadd() {
         local i=1 skip_next=0
         while (( i <= $# )); do
             if (( skip_next )); then skip_next=0; (( i++ )); continue; fi
             case "${@[i]}" in
-                # -O/-D/-A 是内部数组操作，跳过整个调用
+                # -O/-D/-A are internal array operations; skip the entire call
                 -[ODA]) return 0 ;;
-                # -a/-k：展开数组/哈希键
+                # -a/-k: expand array / hash keys
                 -a)  (( i++ )); [[ -n "${@[i]}" ]] && _FINSH_POOL+=( "${(@P)${@[i]}}" ) ;;
                 -k)  (( i++ )); [[ -n "${@[i]}" ]] && _FINSH_POOL+=( "${(kP)${@[i]}}" ) ;;
-                # 带一个参数的 flag，跳过 flag+arg
-                # 对照 zsh manual compadd：-P -S -p -s -W -d -J -V -X -x -r -R -M -F -E -I -i
-                # 额外保留 -t -o（非标准但出现过），false positive 无害
+                # Flags that take one argument: skip flag + argument
+                # Per zsh manual compadd: -P -S -p -s -W -d -J -V -X -x -r -R -M -F -E -I -i
+                # Also keeping -t -o (non-standard but seen in the wild); false positives are harmless
                 -[PSpsWdJVXxrRMFtoEIi]) skip_next=1 ;;
-                # -- 之后全是候选词
+                # Everything after -- is a candidate word
                 --)  (( i++ )); _FINSH_POOL+=( "${@[$i,-1]}" ); return 0 ;;
-                # 其他 flag（含组合 flag 如 -qS、-ld、-QS 等）
-                # 若其中含有需要跳过下一参数的字符，则 skip_next
+                # Other flags (including combined flags like -qS, -ld, -QS, etc.)
+                # If the flag string contains a character that takes an argument, set skip_next
                 -*)  [[ "${@[i]}" =~ '[PSpsWdJVXxrRMFtoEIi]' ]] && skip_next=1 ;;
-                # 实际候选词
+                # Actual candidate word
                 *)   _FINSH_POOL+=( "${@[i]}" ) ;;
             esac
             (( i++ ))
@@ -408,21 +432,22 @@ _finsh_capture() {
         return 0
     }
 
-    # 按优先级触发补全
+    # Trigger completion in priority order
     if   (( ${+functions[_main_complete]} )); then _main_complete
     elif (( ${+functions[_complete]}      )); then _complete
     else
-        # 直接调用命令的补全函数（绕过 dispatcher）
+        # Call the command's completion function directly (bypass dispatcher)
         local _cmd="${words[1]-}" _cfunc="${_comps[${words[1]-}]-}"
         [[ -n "$_cfunc" ]] && "$_cfunc"
     fi
-    # unfunction compadd 由 widget 的 always 块统一负责，此处无需重复
+    # unfunction compadd is handled by the widget's always block; no need to repeat here
 }
 
-# ── 路径补全 ──────────────────────────────────────────────────────────────────
-# word 含 / 时调用。返回 0 表示已处理（widget 应 return），1 表示非路径词（继续）。
-# 读取：$1=word，$2=prefix（光标前的不变部分）
-# 写入：_FINSH_CANDS / _FINSH_PFX / _FINSH_IDX / LBUFFER（ZLE 状态）
+# ── Path completion ───────────────────────────────────────────────────────────
+# Called when word contains /. Returns 0 if handled (widget should return),
+# or 1 if the word is not a path (caller continues).
+# Reads:  $1=word, $2=prefix (unchanged portion before the cursor)
+# Writes: _FINSH_CANDS / _FINSH_PFX / _FINSH_IDX / LBUFFER (ZLE state)
 _finsh_try_path() {
     emulate -L zsh
     setopt extendedglob nullglob
@@ -431,32 +456,34 @@ _finsh_try_path() {
 
     local dir base
     if [[ "$_word" == */ ]]; then
-        # 末尾 / 代表用户明确要补全目录内容（如 ls ~/dev/）
-        # 不能用 :h/:t —— ~/dev/:h="~", :t="dev"，会丢掉目录层级
-        dir="${_word%/}"   # 去掉尾 /，保留完整目录路径
+        dir="${_word%/}"
         base=""
     else
         dir="${_word:h}"
         base="${_word:t}"
     fi
-    # base 不足 1 个字符时不触发（含 trailing-slash 的 base="" 情况）
-    (( ${#base} >= 1 )) || return 0
+    # When base is empty (trailing slash), fall back to native completion.
+    # When base is less than 1 character, do nothing.
+    (( ${#base} >= 1 )) || { [[ "$_word" == */ ]] && zle complete-word; return 0; }
 
-    local xdir="${dir/#\~/$HOME}"   # 展开 ~ （双引号内 ~ 不展开，替换前缀）
-    local sep="${dir%/}/"           # 规范化分隔符：去掉末尾 / 再加回，避免 dir="/" 时双斜杠
-    local xbase="${xdir%/}"         # 去掉末尾 /，防止 "/" → "//" 路径拼接问题
+    local xdir="${dir/#\~/$HOME}"   # expand ~ (~ does not expand inside double quotes)
+    local sep="${dir%/}/"           # normalise separator: strip trailing / then add it back,
+                                    # avoiding double slashes when dir="/"
+    local xbase="${xdir%/}"         # strip trailing / to prevent "//" in path concatenation
     local -a names
     if [[ -z "$xbase" ]]; then
-        names=( /*(.DN) /*(/DN) /*(@DN) )     # 根目录：直接 glob，结果为 /Applications 等
+        names=( /*(.DN) /*(/DN) /*(@DN) )     # root dir: glob directly, results are /Applications etc.
     else
         names=( "${xbase}"/*(.DN) "${xbase}"/*(/DN) "${xbase}"/*(@DN) )
     fi
-    names=( "${names[@]#${xbase}/}" )  # 剥离目录前缀，只保留文件名
+    names=( "${names[@]#${xbase}/}" )  # strip directory prefix, keep only filenames
 
     if (( $#names == 0 )); then zle complete-word; return 0; fi
 
     _finsh_filter "$base" "${names[@]}"
-    # base 为空（word="dir/"）时展示目录下全部文件；有 base 但无匹配则展示全部（路径 pool 通常很小）
+    # When base is empty (word="dir/") show all files in the directory;
+    # when base is non-empty but nothing matched, show everything
+    # (path pools are typically small)
     local -a show
     if (( $#_FINSH_FILTERED )); then
         show=("${_FINSH_FILTERED[@]}")
@@ -474,26 +501,28 @@ _finsh_try_path() {
     (( _FINSH_MAX_CANDS > 0 && $#show > _FINSH_MAX_CANDS )) && show=( "${(@)show[1,$_FINSH_MAX_CANDS]}" )
     _FINSH_CANDS=( "${show[@]}" )
     _FINSH_PFX="${_prefix}${sep}"
-    _FINSH_WORD="$base"
     _FINSH_IDX=0
     _FINSH_SHOW_MODE=1
-    _FINSH_SHOW_POOL=( "${names[@]}" )   # 保存完整文件名池，供继续输入时重过滤
-    _FINSH_SHOW_WORD_PFX=""              # 路径补全无需词前缀变换
+    _FINSH_SHOW_POOL=( "${names[@]}" )   # save full filename pool for live re-filtering
+    _FINSH_SHOW_WORD_PFX=""              # path completion needs no word-prefix transformation
     _finsh_show_candidates
     return 0
 }
 
-# ── 子命令 / 选项候选收集 ──────────────────────────────────────────────────────
-# 输入：$1=word，$2=prefix（光标前缀）
-# 输出写入全局变量（避免 subshell）：
-#   _FINSH_POOL_TMP  – 收集到的候选池
-#   _FINSH_REG_TMP   – 是否有注册补全函数（0/1）
-#   _FINSH_WORD_TMP  – 可能被修改的 word（opts-only 工具会加 "--" 前缀）
+# ── Subcommand / option candidate collection ──────────────────────────────────
+# Input:  $1=word, $2=prefix (portion before the cursor)
+# Output written to global variables (avoids subshell):
+#   _FINSH_POOL_TMP  – collected candidate pool
+#   _FINSH_REG_TMP   – whether a registered completion function exists (0/1)
+#   _FINSH_WORD_TMP  – word possibly modified (opts-only tools get "--" prepended)
 #
-# 三种情况都会尝试 --help 路径：
-#   ① 无注册补全函数（如 zig、hx 安装前）
-#   ② 有注册函数但 hook 为空——_arguments 底层 comparguments builtin 绕过 compadd hook
-#   ③ word 以 - 开头但 hook 捕获到的全是文件/URL 等非选项候选（如 _wget 的 _urls→_files）
+# The --help path is attempted in three situations:
+#   ① No registered completion function (e.g. zig, hx before installation)
+#   ② Registered function exists but the hook captured nothing — _arguments-based
+#      functions (e.g. _hx) use the comparguments C builtin, which bypasses the
+#      function-level compadd hook, leaving the pool permanently empty
+#   ③ word starts with - but all hooked candidates are non-option values
+#      (e.g. _wget's _urls → _files)
 _finsh_collect_subcmd_pool() {
     emulate -L zsh
     local _word="$1" _prefix="$2"
@@ -504,14 +533,16 @@ _finsh_collect_subcmd_pool() {
     local _cmd="${${(Az)_prefix}[1]-}"
 
     if [[ -n "${_comps[$_cmd]-}" ]]; then
-        # ── 有注册补全函数：走 zle -C 捕获路径 ──────────────────────────────
+        # ── Registered completion function: use the zle -C capture path ──────
         _FINSH_REG_TMP=1
-        # 用 zle -C 建立正规 completion context，在此 context 内 compadd 可被函数覆盖
+        # Use zle -C to establish a proper completion context; inside this
+        # context, compadd can be overridden by a function.
         _FINSH_POOL=()
         zle -C _finsh_cap complete-word _finsh_capture
         local slbuf=$LBUFFER srbuf=$RBUFFER
         {
-            # 移除当前词，让 zsh 以空词在上下文中生成完整候选
+            # Remove the current word so zsh generates a full candidate list
+            # from context with an empty word
             LBUFFER="$_prefix"
             RBUFFER=""
             CURSOR=${#LBUFFER}
@@ -520,25 +551,25 @@ _finsh_collect_subcmd_pool() {
             LBUFFER="$slbuf"
             RBUFFER="$srbuf"
             zle -D _finsh_cap 2>/dev/null
-            unfunction compadd 2>/dev/null   # 防止异常退出时 compadd 残留
+            unfunction compadd 2>/dev/null   # clean up in case of abnormal exit
         }
         _FINSH_POOL_TMP=( "${_FINSH_POOL[@]}" )
         _FINSH_POOL=()
     fi
 
-    # ── compadd 未能捕获 或 无注册补全函数：解析 $cmd --help ─────────────────
+    # ── compadd captured nothing, or no registered function: parse $cmd --help ─
     if [[ -n "$_cmd" ]] && {
         (( $#_FINSH_POOL_TMP == 0 )) ||
         { [[ "$_word" == -* ]] && (( ${#${(M)_FINSH_POOL_TMP:#-*}} == 0 )) }
     }; then
-        _FINSH_POOL_TMP=()   # 丢弃无关候选（如文件名），准备用 --help 结果覆盖
+        _FINSH_POOL_TMP=()   # discard irrelevant candidates (e.g. filenames); use --help results instead
         local -a _help_words=()
         local _w
         for _w in ${(Az)_prefix}; do
             [[ "$_w" == -* ]] || _help_words+=("$_w")
         done
 
-        # 缓存 key = 命令词列表拼接，同一 session 相同子命令路径只 fork 一次
+        # Cache key = joined command words; same subcommand path is only forked once per session
         local _cache_key="${(j: :)_help_words}"
         local _help_out
         if [[ -n "${_FINSH_HELP_CACHE[$_cache_key]+x}" ]]; then
@@ -555,20 +586,23 @@ _finsh_collect_subcmd_pool() {
             elif (( $#_FINSH_PARSE_SUBCMDS )); then
                 _FINSH_POOL_TMP=( "${_FINSH_PARSE_SUBCMDS[@]}" )
             elif (( $#_FINSH_PARSE_OPTS )); then
-                # 无子命令但有选项（如 node、hx）
-                # 把 opts 纳入 pool；word 非空时补 -- 前缀，使 "bu" 能匹配 "--build-sea"
+                # No subcommands but options exist (e.g. node, hx).
+                # Route to the opts pool; prepend "--" to a non-empty word so
+                # that "bu" can match "--build-sea".
                 _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
                 [[ -n "$_word" ]] && _FINSH_WORD_TMP="--${_word}"
             fi
         fi
     fi
 
-    # ── --help 无结果：尝试解析 man page ─────────────────────────────────────
-    # 适用场景：无 --help 的 BSD/POSIX 工具（ssh、cp、find 等）
-    #           或 --help 只输出 usage 行无可解析内容
-    # man page 选项通常是 -x 单横杠；用户需明确输入 - 才路由到选项池（不做 "--" 前缀技巧）
-    # 注意：tmux 命令分散在子 section（CLIENTS AND SESSIONS 等）而非 COMMANDS section，
-    #       man page 解析对 tmux 效果有限；tmux 建议改用 tmux list-commands
+    # ── --help yielded nothing: try parsing the man page ─────────────────────
+    # Applicable when: --help is absent (BSD/POSIX tools like ssh, cp, find)
+    # or --help only outputs a usage line with nothing parseable.
+    # Man page options are typically single-dash -x; the user must explicitly
+    # type "-" to route to the options pool (the "--" prefix trick is not applied).
+    # Note: tmux commands are spread across sub-sections (CLIENTS AND SESSIONS, etc.)
+    # rather than a COMMANDS section — man parsing is ineffective for tmux;
+    # use `tmux list-commands` instead.
     if [[ -n "$_cmd" ]] && (( $#_FINSH_POOL_TMP == 0 )); then
         local _man_cache_key="man:${_cmd}"
         local _man_out
@@ -584,7 +618,8 @@ _finsh_collect_subcmd_pool() {
                 _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
             elif (( $#_FINSH_PARSE_SUBCMDS )); then
                 _FINSH_POOL_TMP=( "${_FINSH_PARSE_SUBCMDS[@]}" )
-            # man page 的选项是 -x 单横杠，不做 "--" 前缀路由（要补全选项需显式输入 -）
+            # Man page options are single-dash -x; no "--" prefix routing
+            # (user must type "-" explicitly to complete options)
             fi
         fi
     fi
@@ -595,8 +630,8 @@ _finsh_complete() {
     emulate -L zsh
     setopt extendedglob nullglob
 
-    # ── Tab in show mode：填入第一候选，进入 cycle 模式 ──────────────────────
-    # 不依赖 LASTWIDGET（show 模式期间用户可能已打了其他字符）
+    # ── Tab in show mode: fill first candidate, enter cycle mode ─────────────
+    # Does not rely on LASTWIDGET (the user may have typed characters during show mode)
     if (( _FINSH_SHOW_MODE )) && (( $#_FINSH_CANDS )); then
         _FINSH_SHOW_MODE=0
         _FINSH_SHOW_POOL=()
@@ -607,7 +642,7 @@ _finsh_complete() {
         return
     fi
 
-    # ── Tab in cycle 模式：循环到下一个候选 ────────────────────────────────
+    # ── Tab in cycle mode: advance to the next candidate ─────────────────────
     if [[ "$LASTWIDGET" == "_finsh_complete" ]] && (( $#_FINSH_CANDS )) \
         && [[ "$LBUFFER" == "${_FINSH_PFX}${_FINSH_CANDS[$_FINSH_IDX]}" ]]; then
         _FINSH_IDX=$(( (_FINSH_IDX % $#_FINSH_CANDS) + 1 ))
@@ -616,22 +651,21 @@ _finsh_complete() {
         return
     fi
 
-    # ── 新一轮补全：重置所有状态 ─────────────────────────────────────────────
+    # ── New completion round: reset all state ─────────────────────────────────
     _FINSH_SHOW_MODE=0
     _FINSH_SHOW_POOL=()
     _FINSH_SHOW_WORD_PFX=""
     _FINSH_CANDS=()
     _FINSH_IDX=0
     _FINSH_PFX=""
-    _FINSH_WORD=""
 
-    # 光标不在行尾时回退原生补全
+    # Fall back to native completion when cursor is not at end of line
     (( CURSOR != ${#BUFFER} )) && { zle complete-word; return }
 
     local lbuf=$LBUFFER
     local word prefix
 
-    # 尾部空白 → 光标在新词起始位置，当前词为空
+    # Trailing whitespace → cursor is at the start of a new word; current word is empty
     if [[ "$lbuf" =~ '[[:space:]]$' ]] || [[ -z "$lbuf" ]]; then
         word=""; prefix="$lbuf"
     else
@@ -640,20 +674,20 @@ _finsh_complete() {
         prefix="${lbuf%${word}}"
     fi
 
-    # ── 路径补全 ──────────────────────────────────────────────────────────────
+    # ── Path completion ───────────────────────────────────────────────────────
     if [[ "$word" == */* ]]; then
         _finsh_try_path "$word" "$prefix"
         return
     fi
 
-    # 命令名 / 子命令 / 选项补全：word 不足 1 个字符时不触发
+    # Command name / subcommand / option completion: don't trigger on fewer than 1 character
     (( ${#word} >= 1 )) || return
 
     local -a pool=()
     local _registered=0
-    local raw_word="$word"   # 保存 _finsh_collect_subcmd_pool 修改前的原始词
+    local raw_word="$word"   # save the original word before _finsh_collect_subcmd_pool may modify it
 
-    # ── 命令名补全 ────────────────────────────────────────────────────────────
+    # ── Command name completion ───────────────────────────────────────────────
     if [[ "$prefix" =~ '^[[:space:]]*$' ]]; then
         pool=(
             ${(k)commands}
@@ -662,7 +696,7 @@ _finsh_complete() {
             ${(k)builtins}
         )
 
-    # ── 子命令 / 选项補全 ─────────────────────────────────────────────────────
+    # ── Subcommand / option completion ───────────────────────────────────────
     else
         _finsh_collect_subcmd_pool "$word" "$prefix"
         pool=( "${_FINSH_POOL_TMP[@]}" )
@@ -670,62 +704,68 @@ _finsh_complete() {
         word="$_FINSH_WORD_TMP"
     fi
 
-    # opts-only 工具会在 word 前加 "--"（如 "bu" → "--bu"），记录前缀供 show 模式重过滤用
+    # opts-only tools prepend "--" to word (e.g. "bu" → "--bu");
+    # record the prefix for show-mode re-filtering
     _FINSH_SHOW_WORD_PFX=""
     (( ${#word} > ${#raw_word} )) && _FINSH_SHOW_WORD_PFX="${word[1,${#word}-${#raw_word}]}"
 
-    pool=( ${(u)pool} )   # 去重
+    pool=( ${(u)pool} )   # deduplicate
 
     if (( $#pool == 0 )); then
-        # 有注册补全函数但 pool 为空：函数跑了没结果（如 just 在无 justfile 目录）
-        #   → 安静退出，不回退，避免再次触发 zle complete-word 产生错误补全
-        # 无注册补全函数且 help 也无结果：才回退原生补全（通常做文件补全）
+        # Registered completion function but pool is empty: the function ran and
+        # produced no results (e.g. just in a directory without a justfile).
+        #   → exit silently; do not fall back to zle complete-word to avoid
+        #     producing incorrect completions.
+        # No registered function and --help also yielded nothing: fall back to
+        # native completion (usually file completion).
         (( _registered )) || zle complete-word
         return
     fi
 
-    # ── 多级过滤 ─────────────────────────────────────────────────────────────
+    # ── Multi-pass filtering ──────────────────────────────────────────────────
     _finsh_filter "$word" "${pool[@]}"
     local -a show
     if (( $#_FINSH_FILTERED )); then
         show=("${_FINSH_FILTERED[@]}")
     elif [[ -z "$word" ]]; then
-        show=("${pool[@]}")   # word 为空时展示全部（命令名列表等）
+        show=("${pool[@]}")   # show everything when word is empty (e.g. command list)
     else
-        return   # 有输入但无匹配，安静退出，让用户继续打字
+        return   # input present but no match — exit silently, let the user keep typing
     fi
 
-    # 唯一候选直接补全，不展示列表
+    # Unique candidate: fill it directly without showing a list
     if (( $#show == 1 )); then
         LBUFFER="${prefix}${show[1]}"
         zle reset-prompt
         return
     fi
 
-    # ── 进入 show 模式：展示候选列表，不填入任何候选 ────────────────────────
-    # 用户可继续输入以实时过滤；再次 Tab → 填入第一候选（cycle 模式）
+    # ── Enter show mode: display candidate list without filling anything ──────
+    # The user can continue typing to live-filter; Tab again fills the first
+    # candidate and enters cycle mode.
     _FINSH_TOTAL=$#show
     (( _FINSH_MAX_CANDS > 0 && $#show > _FINSH_MAX_CANDS )) && show=( "${(@)show[1,$_FINSH_MAX_CANDS]}" )
     _FINSH_CANDS=( "${show[@]}" )
     _FINSH_PFX="$prefix"
-    _FINSH_WORD="$word"
     _FINSH_IDX=0
     _FINSH_SHOW_MODE=1
-    _FINSH_SHOW_POOL=( "${pool[@]}" )   # 保存去重后的完整候选池
-    # LBUFFER 保持不变
+    _FINSH_SHOW_POOL=( "${pool[@]}" )   # save deduplicated full candidate pool
+    # LBUFFER is left unchanged
     _finsh_show_candidates
 }
 
-# ── 历史自动建议 ──────────────────────────────────────────────────────────────
-# 在 $history 中从最近记录向前搜索第一条以 needle 开头且比 needle 更长的命令。
-# 结果写入全局 _FINSH_SUGGESTION（避免 subshell 开销）。
+# ── History autosuggestion ────────────────────────────────────────────────────
+# Searches $history from the most recent entry backwards for the first command
+# that starts with needle and is longer than needle.
+# Result is written to global _FINSH_SUGGESTION (avoids subshell overhead).
 _finsh_search_history() {
     local needle="$1"
     _FINSH_SUGGESTION=""
     [[ -z "$needle" ]] && return
 
     local -a nums
-    nums=( ${(Onk)history} )   # 事件号从大到小（最近优先）；不加外层引号，否则 @On 把 keys 当单一字符串
+    nums=( ${(Onk)history} )   # event numbers largest-first (most recent first);
+                                # no outer quotes — otherwise @On treats all keys as one string
     local num entry
     for num in "${nums[@]}"; do
         entry="${history[$num]}"
@@ -736,12 +776,13 @@ _finsh_search_history() {
     done
 }
 
-# POSTDISPLAY + region_highlight 刷新。
-# 补全循环中不更新（由 _finsh_pre_redraw 清零）；光标不在行尾时隐藏；
-# LBUFFER 未变时直接复用缓存，避免每次 pre-redraw 都重新排序 $history。
+# Refresh POSTDISPLAY + region_highlight.
+# Not updated during the completion cycle (zeroed by _finsh_pre_redraw);
+# hidden when cursor is not at end of line.
+# When LBUFFER is unchanged, reuse the cache to avoid re-sorting $history on every pre-redraw.
 _finsh_update_suggestion() {
     emulate -L zsh
-    # 清除旧高亮（memo=finsh-sug 标识本插件的条目）
+    # Clear old highlights (memo=finsh-sug identifies entries owned by this plugin)
     region_highlight=( ${region_highlight:#*memo=finsh-sug} )
 
     if (( $#_FINSH_CANDS )) || (( CURSOR != ${#BUFFER} )); then
@@ -749,7 +790,7 @@ _finsh_update_suggestion() {
         return
     fi
 
-    # LBUFFER 未变：复用缓存
+    # LBUFFER unchanged: reuse cached suggestion
     if [[ "$LBUFFER" != "$_FINSH_SUGGESTION_NEEDLE" ]]; then
         _finsh_search_history "$LBUFFER"
         _FINSH_SUGGESTION_NEEDLE="$LBUFFER"
@@ -762,7 +803,8 @@ _finsh_update_suggestion() {
     fi
 }
 
-# 右方向键：有建议时全量接受，否则退化为普通 forward-char。
+# Right arrow: accept the full suggestion when one is shown; otherwise fall
+# back to ordinary forward-char.
 _finsh_autosuggest_accept() {
     emulate -L zsh
     if [[ -n "$POSTDISPLAY" ]]; then
@@ -777,61 +819,67 @@ _finsh_autosuggest_accept() {
 }
 zle -N _finsh_autosuggest_accept
 
-# ── 包装 accept-line：在最终渲染前清空建议 ────────────────────────────────────
-# zle-line-finish 触发时 ZLE 已完成最终渲染，清空 POSTDISPLAY 为时已晚；
-# 必须在 accept-line 被调用时立即清空，才能阻止灰色文字随行输出打印到终端。
-# 问题根因：accept-line 后 zle-line-pre-redraw 仍会触发一次 _finsh_update_suggestion。
-# 若把 _FINSH_SUGGESTION_NEEDLE 重置为 ""，update-sug 会判断 LBUFFER != needle，
-# 重新搜历史并把建议写回 POSTDISPLAY，灰色文字随最终渲染打印到终端。
-# 修复：将 needle 设为当前 LBUFFER（而非 ""），使 update-sug 命中缓存，
-# 复用已清空的 _FINSH_SUGGESTION=""，POSTDISPLAY 保持为空。
+# ── Wrap accept-line: clear suggestion before final render ────────────────────
+# zle-line-finish fires after ZLE has finished the final render, so clearing
+# POSTDISPLAY there is too late. We must clear it the moment accept-line is
+# called to prevent the grey suggestion text from being printed to the terminal
+# along with the accepted line.
+#
+# Root cause: zle-line-pre-redraw fires once more after accept-line, triggering
+# _finsh_update_suggestion again. If _FINSH_SUGGESTION_NEEDLE were reset to "",
+# update-sug would see LBUFFER != needle, re-search history, write the suggestion
+# back to POSTDISPLAY, and the grey text would appear in the final render.
+# Fix: set needle to the current LBUFFER (not ""), so update-sug hits the cache
+# and reuses the already-cleared _FINSH_SUGGESTION="", keeping POSTDISPLAY empty.
 _finsh_accept_line() {
     emulate -L zsh
     POSTDISPLAY=""
     region_highlight=( ${region_highlight:#*memo=finsh-sug} )
     _FINSH_SUGGESTION=""
-    _FINSH_SUGGESTION_NEEDLE="$LBUFFER"   # 锁定 needle，阻止 pre-redraw 重新搜历史
+    _FINSH_SUGGESTION_NEEDLE="$LBUFFER"   # lock needle to prevent pre-redraw from re-searching history
     zle .accept-line
 }
 zle -N accept-line _finsh_accept_line
 
-# ── 自动清除候选菜单 ──────────────────────────────────────────────────────────
-# zle-line-pre-redraw 在每次重绘前触发；若上一个 widget 不是本 widget，
-# 说明用户做了其他操作（Backspace、输入、方向键等），此时清除菜单和循环状态。
+# ── Auto-clear candidate menu ─────────────────────────────────────────────────
+# zle-line-pre-redraw fires before every redraw. If the last widget was not this
+# one, the user performed some other action (Backspace, typing, arrow keys, etc.),
+# so we clear the menu and cycle state.
 _finsh_pre_redraw() {
     emulate -L zsh
     if [[ "$LASTWIDGET" == "_finsh_complete" ]]; then
-        # 补全循环期间（含首次 Tab 进入 show 模式）：清除建议，保留候选菜单
+        # During the completion cycle (including the first Tab that enters show
+        # mode): clear suggestion but keep the candidate menu
         POSTDISPLAY=""
         region_highlight=( ${region_highlight:#*memo=finsh-sug} )
         return
     fi
 
-    # ── Show 模式：用户继续输入时实时重过滤候选列表 ───────────────────────────
+    # ── Show mode: live re-filter candidate list as the user types ────────────
     if (( _FINSH_SHOW_MODE )) && (( $#_FINSH_SHOW_POOL )); then
-        # 提取当前词：去掉固定的 _FINSH_PFX 前缀部分
+        # Extract the current word by stripping the fixed _FINSH_PFX portion
         local _sm_cur_word=""
         if [[ "${LBUFFER[1,${#_FINSH_PFX}]}" == "$_FINSH_PFX" ]]; then
             _sm_cur_word="${LBUFFER[${#_FINSH_PFX}+1,-1]}"
         else
-            # 用户回删进了前缀区域：退出 show 模式
+            # User backspaced into the prefix region: exit show mode
             _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
-            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
+            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""
             zle -M ""
             _finsh_update_suggestion
             return
         fi
 
-        # 当前词不足 1 个字符：退出 show 模式（触发条件：用户回删）
+        # Current word shorter than 1 character: exit show mode (user backspaced)
         if (( ${#_sm_cur_word} < 1 )); then
             _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
-            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
+            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""
             zle -M ""
             _finsh_update_suggestion
             return
         fi
 
-        # 应用 opts-only 工具的 "--" 前缀（使 "bu" 能匹配 "--build"）
+        # Apply the "--" prefix for opts-only tools (so "bu" can match "--build")
         local _sm_filter_word="${_FINSH_SHOW_WORD_PFX}${_sm_cur_word}"
 
         _finsh_filter "$_sm_filter_word" "${_FINSH_SHOW_POOL[@]}"
@@ -841,20 +889,20 @@ _finsh_pre_redraw() {
         elif [[ -z "$_sm_filter_word" ]]; then
             _sm_show=("${_FINSH_SHOW_POOL[@]}")
         else
-            # 无匹配：退出 show 模式，清除候选列表
+            # No match: exit show mode and clear the candidate list
             _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
-            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
+            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""
             zle -M ""
             _finsh_update_suggestion
             return
         fi
 
-        # 更新候选列表并展示（_FINSH_IDX=0 → 无方括号高亮，show 模式下无选中项）
+        # Update and display the candidate list
+        # (_FINSH_IDX=0 → no bracket highlight; no selection in show mode)
         _FINSH_TOTAL=$#_sm_show
         (( _FINSH_MAX_CANDS > 0 && $#_sm_show > _FINSH_MAX_CANDS )) && _sm_show=( "${(@)_sm_show[1,$_FINSH_MAX_CANDS]}" )
         _FINSH_CANDS=( "${_sm_show[@]}" )
         _FINSH_IDX=0
-        _FINSH_WORD="$_sm_cur_word"
         POSTDISPLAY=""
         region_highlight=( ${region_highlight:#*memo=finsh-sug} )
         _finsh_show_candidates
@@ -866,7 +914,6 @@ _finsh_pre_redraw() {
         _FINSH_CANDS=()
         _FINSH_IDX=0
         _FINSH_PFX=""
-        _FINSH_WORD=""
         zle -M ""
     fi
     _finsh_update_suggestion
@@ -876,7 +923,7 @@ add-zle-hook-widget zle-line-pre-redraw _finsh_pre_redraw
 
 zle -N _finsh_complete
 bindkey '^I'   _finsh_complete   # Tab
-bindkey '^[[Z' complete-word       # Shift+Tab 保留原生补全
-bindkey '^[[C' _finsh_autosuggest_accept   # 右方向键（大多数终端）
-bindkey '^[OC' _finsh_autosuggest_accept   # 右方向键（部分终端）
-bindkey '^F'   _finsh_autosuggest_accept   # Ctrl+F（emacs forward-char，语义等价）
+bindkey '^[[Z' complete-word       # Shift+Tab — keep native completion
+bindkey '^[[C' _finsh_autosuggest_accept   # Right arrow (most terminals)
+bindkey '^[OC' _finsh_autosuggest_accept   # Right arrow (some terminals)
+bindkey '^F'   _finsh_autosuggest_accept   # Ctrl+F (emacs forward-char, semantically equivalent)

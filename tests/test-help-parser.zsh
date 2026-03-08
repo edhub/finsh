@@ -1,19 +1,22 @@
 #!/usr/bin/env zsh
 # tests/test-help-parser.zsh
-# 测试 _finsh_parse_help 函数的 help 输出解析逻辑，以及 _finsh_filter 多级匹配逻辑
+# Unit tests for _finsh_parse_help help-output parsing logic and
+# _finsh_filter multi-pass matching logic.
 #
-# 用法：
+# Usage:
 #   zsh tests/test-help-parser.zsh
 #
-# 无外部依赖，纯 zsh 运行。
+# No external dependencies; runs in plain zsh.
 
 emulate -L zsh
 setopt extendedglob
 
-# ── 加载被测函数 ──────────────────────────────────────────────────────────────
-# 只 source 用到的全局变量声明和 _finsh_parse_help / _finsh_filter 函数；
-# 用 awk 截取到 "_finsh_show_candidates" 定义前，避免加载 ZLE/widget 相关代码
-# （ZLE 只在 interactive shell 中可用，测试环境无 zle 命令）
+# ── Load functions under test ─────────────────────────────────────────────────
+# Source only the global variable declarations and the
+# _finsh_parse_help / _finsh_filter / _finsh_parse_man functions.
+# awk extracts everything up to (but not including) the _finsh_show_candidates
+# definition, so ZLE/widget code is never loaded — zle is only available in
+# interactive shells and is not present in the test environment.
 _SCRIPT_DIR="${0:A:h}/.."
 typeset -ga _FINSH_PARSE_SUBCMDS
 typeset -ga _FINSH_PARSE_OPTS
@@ -23,11 +26,11 @@ source <(awk '
     in_fn { print; brace += gsub(/\{/,"{")-gsub(/\}/,"}"); if (brace==0 && NR>1) in_fn=0 }
 ' "$_SCRIPT_DIR/finsh.zsh")
 
-# ── 断言工具 ──────────────────────────────────────────────────────────────────
+# ── Assertion helpers ─────────────────────────────────────────────────────────
 typeset -gi _PASS=0 _FAIL=0
 
 _assert_contains() {
-    local -a arr=("${@[1,-3]}")   # 除最后两参数外均为数组元素
+    local -a arr=("${@[1,-3]}")   # all but the last two arguments form the array
     local item="${@[-2]}" msg="${@[-1]}"
     if (( ${arr[(I)${(b)item}]} )); then
         (( _PASS++ ))
@@ -65,8 +68,8 @@ _assert_empty() {
     fi
 }
 
-# ── Fixture 辅助 ──────────────────────────────────────────────────────────────
-# 每个 fixture 是真实 --help 输出的精简截取（保留格式不变）
+# ── Fixture helper ────────────────────────────────────────────────────────────
+# Each fixture is an abbreviated excerpt of real --help output (format preserved).
 run_test() {
     local name="$1" help_text="$2"
     print "\n── $name"
@@ -74,7 +77,7 @@ run_test() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 1: zig --help（2 空格缩进）
+# TEST 1: zig --help (2-space indent)
 # ─────────────────────────────────────────────────────────────────────────────
 run_test "zig  (2-space indent)" \
 'Usage: zig [command] [options]
@@ -106,19 +109,19 @@ General Options:
 
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "zig: build"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run"       "zig: run"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build-exe" "zig: build-exe (带连字符)"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "ast-check" "zig: ast-check (带连字符)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build-exe" "zig: build-exe (hyphenated)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "ast-check" "zig: ast-check (hyphenated)"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "fmt"       "zig: fmt"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "cc"        "zig: cc (两字母)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "cc"        "zig: cc (two letters)"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "version"   "zig: version"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--help"    "zig: --help 选项"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--color"   "zig: --color 选项"
-# 描述文字不应被误匹配（首字母大写，已被 [a-z] 排除）
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Build"   "zig: 描述词 'Build' 不应入池"
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Print"   "zig: 描述词 'Print' 不应入池"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--help"    "zig: --help option"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--color"   "zig: --color option"
+# Description words (uppercase first letter) must not be matched ([a-z] excludes them)
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Build"   "zig: description word 'Build' must not enter pool"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Print"   "zig: description word 'Print' must not enter pool"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 2: git --help（3 空格缩进，分区标题行插入）
+# TEST 2: git --help (3-space indent, section header lines inserted)
 # ─────────────────────────────────────────────────────────────────────────────
 run_test "git  (3-space indent, section headers)" \
 'usage: git [-v | --version] [-h | --help] <command> [<args>]
@@ -154,12 +157,12 @@ _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "add"     "git: add"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "commit"  "git: commit"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "push"    "git: push"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "switch"  "git: switch"
-# 分区标题行（无缩进）不应匹配
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "start"       "git: 分区标题 'start' 不应入池"
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "collaborate" "git: 分区标题 'collaborate' 不应入池"
+# Section header lines (no indent) must not be matched
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "start"       "git: section header 'start' must not enter pool"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "collaborate" "git: section header 'collaborate' must not enter pool"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 3: cargo --help（4 空格缩进，逗号别名 "build, b"）
+# TEST 3: cargo --help (4-space indent, comma aliases "build, b")
 # ─────────────────────────────────────────────────────────────────────────────
 run_test "cargo  (4-space indent, comma aliases)" \
 'Rust'\''s package manager
@@ -191,22 +194,22 @@ Commands:
     ...         See all commands with --list'
 
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "cargo: build"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "b"         "cargo: b (build 的别名)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "b"         "cargo: b (alias for build)"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "check"     "cargo: check"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "c"         "cargo: c (check 的别名)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "c"         "cargo: c (alias for check)"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "clean"     "cargo: clean"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "install"   "cargo: install"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "cargo: --version 选项"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--list"    "cargo: --list 选项（无短格式）"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--quiet"   "cargo: --quiet 选项"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--offline" "cargo: --offline 选项"
-# "..." 不应入池（不匹配 [a-z][-a-z0-9]*）
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "..."  "cargo: '...' 不应入池"
-# Bug 18：描述文字里的逗号不应切出假词
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "but"  "cargo Bug18: 描述里的 'but' 不应入池"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "cargo: --version option"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--list"    "cargo: --list option (no short form)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--quiet"   "cargo: --quiet option"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--offline" "cargo: --offline option"
+# "..." must not enter the pool (does not match [a-z][-a-z0-9]*)
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "..."  "cargo: '...' must not enter pool"
+# Bug 18: commas inside the description must not produce spurious tokens
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "but"  "cargo Bug18: 'but' from description must not enter pool"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 4: npm --help（4 空格缩进，多行逗号列表）
+# TEST 4: npm --help (4-space indent, multi-line comma list)
 # ─────────────────────────────────────────────────────────────────────────────
 run_test "npm  (4-space, multi-line comma list)" \
 'npm <command>
@@ -224,12 +227,12 @@ _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "access"    "npm: access"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "install"   "npm: install"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "publish"   "npm: publish"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "test"      "npm: test"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "whoami"    "npm: whoami (最后一个词)"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "dist-tag"  "npm: dist-tag (带连字符)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "whoami"    "npm: whoami (last word on line)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "dist-tag"  "npm: dist-tag (hyphenated)"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run"       "npm: run"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 5: docker --help（2 空格缩进，带 * 后缀的行）
+# TEST 5: docker --help (2-space indent, trailing * on buildx)
 # ─────────────────────────────────────────────────────────────────────────────
 run_test "docker  (2-space indent, trailing * on buildx)" \
 'Usage:  docker [OPTIONS] COMMAND
@@ -264,24 +267,24 @@ Global Options:
 
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run"       "docker: run"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "docker: build"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "ps"        "docker: ps (两字母)"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "buildx"    "docker: buildx（* 后缀应被截断）"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "ps"        "docker: ps (two letters)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "buildx"    "docker: buildx (trailing * should be stripped)"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "container" "docker: container"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "logs"      "docker: logs"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--config"  "docker: --config 选项"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--debug"   "docker: --debug 选项"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "docker: --version 选项"
-# "buildx*" 不应整体入池
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "buildx*" "docker: 'buildx*' 不应整体入池"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--config"  "docker: --config option"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--debug"   "docker: --debug option"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "docker: --version option"
+# "buildx*" must not enter the pool as a literal string
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "buildx*" "docker: 'buildx*' must not enter pool as-is"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 6: hx --help（clap 风格，USAGE:/ARGS:/FLAGS: 纯大写 section，无子命令）
+# TEST 6: hx --help (clap style: USAGE:/ARGS:/FLAGS: all-caps sections, no subcommands)
 # ─────────────────────────────────────────────────────────────────────────────
-# 状态机路径：
-#   USAGE: → other（跳过 "    hx [FLAGS]..." 行，避免 hx 误入子命令池）
-#   ARGS:  → other（跳过 "<files>..." 行）
-#   FLAGS: → opts（提取所有 --flag）
-#   续行（35+ 空格对齐）在 opts 状态下不含 --，自然跳过
+# State machine path:
+#   USAGE: → other  (skip "    hx [FLAGS]..." to prevent 'hx' from entering subcmds)
+#   ARGS:  → other  (skip "<files>..." lines)
+#   FLAGS: → opts   (extract all --flags)
+#   Continuation lines (35+ space alignment) contain no --, so they are skipped naturally
 run_test "hx  (clap style: USAGE:/FLAGS: sections, no subcommands)" \
 'helix-term 25.07.1 (a05c151b)
 A post-modern text editor.
@@ -308,7 +311,7 @@ FLAGS:
     -w, --working-dir <path>       Specify an initial working directory
     +N                             Open the first given file at line number N'
 
-# 选项全部应被捕获
+# All options must be captured
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--help"        "hx: --help"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--tutor"       "hx: --tutor"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--health"      "hx: --health"
@@ -319,18 +322,18 @@ _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version"     "hx: --version"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--vsplit"      "hx: --vsplit"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--hsplit"      "hx: --hsplit"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--working-dir" "hx: --working-dir"
-# hx 无子命令
-_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}"    "hx: 无子命令"
-# USAGE: 段内容不应误入子命令池（旧实现的假阳性）
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "hx" "hx: USAGE 行里的 'hx' 不应入池"
-# 35+ 空格续行里的 'or' 不应误入子命令池（旧实现的假阳性）
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "or" "hx: 续行里的 'or' 不应入池"
+# hx has no subcommands
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}"    "hx: no subcommands"
+# USAGE: section content must not enter the subcmds pool (false positive in old implementation)
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "hx" "hx: 'hx' from USAGE line must not enter pool"
+# 'or' from a 35+-space continuation line must not enter the subcmds pool
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "or" "hx: 'or' from continuation line must not enter pool"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 7: node --help（只有选项，无子命令；非 - 开头的 word 应匹配 --flag）
+# TEST 7: node --help (options only, no subcommands; non-dash word should match --flags)
 # ─────────────────────────────────────────────────────────────────────────────
-# node 选项格式：多行描述，"  --flag" 后大量空格或直接换行
-# "Options:" section header → opts 状态
+# node option format: multi-line descriptions, "  --flag" followed by many spaces or a newline
+# "Options:" section header → opts state
 run_test "node  (opts-only, non-dash word should match --flags)" \
 'Usage: node [options] [ script.js ] [arguments]
 
@@ -351,11 +354,11 @@ Options:
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--build-sea"       "node: --build-sea"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--build-snapshot"  "node: --build-snapshot"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--inspect"         "node: --inspect"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--check"           "node: --check (有短格式 -c,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--check"           "node: --check (has short form -c,)"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version"         "node: --version"
-_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"                     "node: 无子命令"
+_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"                     "node: no subcommands"
 
-# 模拟 widget 路由：word="bu" → 补 -- 前缀后应匹配 --build-*
+# Simulate widget routing: word="bu" → prepend "--" → should match --build-*
 local _word="bu" _pool=()
 if [[ "$_word" == -* ]]; then
     _pool=( "${_FINSH_PARSE_OPTS[@]}" )
@@ -366,11 +369,11 @@ elif (( $#_FINSH_PARSE_OPTS )); then
     [[ -n "$_word" ]] && _word="--${_word}"
 fi
 _finsh_filter "$_word" "${_pool[@]}"
-_assert_contains "${_FINSH_FILTERED[@]}" "--build-sea"      "node routing: 'bu' 匹配 --build-sea"
-_assert_contains "${_FINSH_FILTERED[@]}" "--build-snapshot" "node routing: 'bu' 匹配 --build-snapshot"
+_assert_contains "${_FINSH_FILTERED[@]}" "--build-sea"      "node routing: 'bu' matches --build-sea"
+_assert_contains "${_FINSH_FILTERED[@]}" "--build-snapshot" "node routing: 'bu' matches --build-snapshot"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 8: wget --help（多字符短选项 -nv, -nc, -4, -6 — Bug 19）
+# TEST 8: wget --help (multi-char short options -nv, -nc, -4, -6 — Bug 19)
 # ─────────────────────────────────────────────────────────────────────────────
 run_test "wget  (multi-char short options: -nv, -nc, -4, -6 — Bug 19)" \
 'GNU Wget 1.21.4, a non-interactive network retriever.
@@ -393,52 +396,52 @@ Logging and input file:
   -v,  --verbose           be verbose (this is the default)
        --no-dns-cache      Disable caching DNS lookups.'
 
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--version"      "wget Bug19: --version (单字母短选项)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--version"      "wget Bug19: --version (single-char short option)"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "--help"         "wget Bug19: --help"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-verbose"   "wget Bug19: --no-verbose (多字符短选项 -nv,)"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-clobber"   "wget Bug19: --no-clobber (多字符短选项 -nc,)"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--inet4-only"   "wget Bug19: --inet4-only (数字短选项 -4,)"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--inet6-only"   "wget Bug19: --inet6-only (数字短选项 -6,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-verbose"   "wget Bug19: --no-verbose (multi-char short option -nv,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-clobber"   "wget Bug19: --no-clobber (multi-char short option -nc,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--inet4-only"   "wget Bug19: --inet4-only (digit short option -4,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--inet6-only"   "wget Bug19: --inet6-only (digit short option -6,)"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "--quiet"        "wget Bug19: --quiet"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "--verbose"      "wget Bug19: --verbose"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-dns-cache" "wget Bug19: --no-dns-cache (无短格式)"
-_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"               "wget: 无子命令"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-dns-cache" "wget Bug19: --no-dns-cache (no short form)"
+_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"               "wget: no subcommands"
 
-run_test "edge: 空输入" ""
+run_test "edge: empty input" ""
 
-_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "空输入：subcmds 应为空"
-_assert_empty "${_FINSH_PARSE_OPTS[@]}"    "空输入：opts 应为空"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "empty input: subcmds should be empty"
+_assert_empty "${_FINSH_PARSE_OPTS[@]}"    "empty input: opts should be empty"
 
-run_test "edge: 无缩进行不应匹配" \
+run_test "edge: unindented lines should not match" \
 'build    compile the project
 run      run the project
 --help   show help'
 
-_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "无缩进：subcmds 应为空（缩进不足 2 空格）"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "no indent: subcmds should be empty (indent < 2 spaces)"
 
-run_test "edge: 纯选项（无子命令）" \
+run_test "edge: options only (no subcommands)" \
 'Options:
   -v, --verbose    Verbose output
   -q, --quiet      Quiet output
       --dry-run    Dry run mode
   -o, --output <file>  Output file'
 
-_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}"    "纯选项：subcmds 应为空"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--verbose"  "纯选项: --verbose"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--quiet"    "纯选项: --quiet"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--dry-run"  "纯选项: --dry-run"
-_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--output"   "纯选项: --output"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}"    "opts-only: subcmds should be empty"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--verbose"  "opts-only: --verbose"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--quiet"    "opts-only: --quiet"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--dry-run"  "opts-only: --dry-run"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--output"   "opts-only: --output"
 
-run_test "edge: 描述中含 -- 不应匹配为选项" \
+run_test "edge: -- inside description must not be matched as an option" \
 '  build    compile (use --release for optimized build)
   test     run tests'
 
-_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "描述含--：build 正常入池"
-_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "test"      "描述含--：test 正常入池"
-_assert_not_contains "${_FINSH_PARSE_OPTS[@]}"    "--release" "描述含--：描述里的 --release 不入选项池"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "desc-with-dash: build enters pool normally"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "test"      "desc-with-dash: test enters pool normally"
+_assert_not_contains "${_FINSH_PARSE_OPTS[@]}"    "--release" "desc-with-dash: --release inside description must not enter opts pool"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _finsh_parse_man 单元测试
+# _finsh_parse_man unit tests
 # ─────────────────────────────────────────────────────────────────────────────
 
 run_man_test() {
@@ -447,8 +450,9 @@ run_man_test() {
     _finsh_parse_man "$man_text"
 }
 
-# TEST M1: BSD 工具选项嵌在 DESCRIPTION（仿 ssh / cp 格式）
-# DESCRIPTION 无冒号全大写 → other state；选项 -x + 1+空格 → 应被捕获
+# TEST M1: BSD tool options embedded in DESCRIPTION (ssh / cp style)
+# DESCRIPTION has no colon and is all-uppercase → other state;
+# options with -x + 1+ spaces should be captured
 run_man_test "ssh-style  (options in DESCRIPTION, no OPTIONS section)" \
 'NAME
      ssh -- OpenSSH remote login client
@@ -493,11 +497,11 @@ _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-C" "ssh-man: -C"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-f" "ssh-man: -f"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-N" "ssh-man: -N"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-v" "ssh-man: -v"
-_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"    "ssh-man: 无子命令"
-# FILES section 内容不应入选项池
-_assert_not_contains "${_FINSH_PARSE_OPTS[@]}" "-s" "ssh-man: FILES 路径里无 -s 假阳性"
+_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"    "ssh-man: no subcommands"
+# FILES section content must not produce false positives in the opts pool
+_assert_not_contains "${_FINSH_PARSE_OPTS[@]}" "-s" "ssh-man: no false positive -s from FILES path"
 
-# TEST M2: cp-style（5空格 + -x + 4空格间距）
+# TEST M2: cp-style (5-space + -x + 4-space gap between flag and description)
 run_man_test "cp-style  (4-space gap between flag and description)" \
 'NAME
      cp -- copy files
@@ -533,11 +537,11 @@ _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-f" "cp-man: -f"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-i" "cp-man: -i"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-n" "cp-man: -n"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}" "-v" "cp-man: -v"
-_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"    "cp-man: 无子命令"
-# SEE ALSO 里的 mv(1)、ln(1) 不应被捕获
-_assert_not_contains "${_FINSH_PARSE_OPTS[@]}" "-m" "cp-man: SEE ALSO 不产生假阳性"
+_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"    "cp-man: no subcommands"
+# SEE ALSO section (mv(1), ln(1)) must not produce false positives
+_assert_not_contains "${_FINSH_PARSE_OPTS[@]}" "-m" "cp-man: no false positive from SEE ALSO"
 
-# TEST M3: 有显式 COMMANDS section 的工具（仿简单 CLI 工具 man page）
+# TEST M3: tool with an explicit COMMANDS section (simple CLI man page)
 run_man_test "custom-cli  (explicit COMMANDS section, all-caps no-colon)" \
 'NAME
      mycli -- a simple CLI tool
@@ -564,16 +568,16 @@ OPTIONS
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "init"   "custom-man COMMANDS: init"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"  "custom-man COMMANDS: build"
 _assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "test"   "custom-man COMMANDS: test"
-_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "deploy" "custom-man COMMANDS: deploy (无 flags)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "deploy" "custom-man COMMANDS: deploy (no flags)"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "-h"     "custom-man OPTIONS: -h"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "-v"     "custom-man OPTIONS: -v"
 _assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "custom-man OPTIONS: --version"
-# COMMANDS section 的描述行不应入 subcmds 池
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Initialize" "custom-man: 描述词不入池"
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Build"      "custom-man: 描述词不入池"
+# Description lines in the COMMANDS section must not enter the subcmds pool
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Initialize" "custom-man: description word must not enter pool"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Build"      "custom-man: description word must not enter pool"
 
-# TEST M4: tmux-style（命令在非 COMMANDS section，当前设计收不到，验证不会崩溃）
-# 预期：subcmds 为空（tmux 命令散布于 CLIENTS AND SESSIONS 等子 section）
+# TEST M4: tmux-style (commands under non-COMMANDS sub-sections; verify no crash)
+# Expected: subcmds is empty (tmux commands spread across CLIENTS AND SESSIONS etc.)
 run_man_test "tmux-style  (commands under non-COMMANDS sections, expected empty subcmds)" \
 'NAME
      tmux -- terminal multiplexer
@@ -594,84 +598,85 @@ CLIENTS AND SESSIONS
            (alias: attach)
            If run from outside tmux, attach to target-session.'
 
-# tmux 命令在 CLIENTS AND SESSIONS（other state），当前不收集 → subcmds 为空
-# 不会崩溃，gracefully 返回空
-_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "tmux-man: subcmds 为空（命令在子 section，already known limitation）"
-# COMMANDS section 的散文描述行不应误入（target-session is tried...）
-_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "target-session" "tmux-man: 散文行 'target-session is tried' 不入池"
+# tmux commands are in CLIENTS AND SESSIONS (other state), so they are not
+# collected → subcmds is empty. Should return gracefully without crashing.
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "tmux-man: subcmds empty (commands in sub-sections — known limitation)"
+# Prose lines in the COMMANDS section must not enter the pool ("target-session is tried...")
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "target-session" "tmux-man: prose line 'target-session is tried' must not enter pool"
 
-# TEST M5: 空输入 + man page 格式
-run_man_test "man: 空输入" ""
-_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "man空输入: subcmds 为空"
-_assert_empty "${_FINSH_PARSE_OPTS[@]}"    "man空输入: opts 为空"
+# TEST M5: empty input for man page parser
+run_man_test "man: empty input" ""
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "man empty input: subcmds should be empty"
+_assert_empty "${_FINSH_PARSE_OPTS[@]}"    "man empty input: opts should be empty"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _finsh_filter 单元测试
+# _finsh_filter unit tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-print "\n── _finsh_filter: Pass 1（精确前缀）"
+print "\n── _finsh_filter: Pass 1 (exact prefix)"
 local -a _p=("pi-claude" "pi-cat" "python" "pi" "perl")
 _finsh_filter "pi" "${_p[@]}"
 _assert_contains     "${_FINSH_FILTERED[@]}" "pi-claude" "Pass1: pi → pi-claude"
 _assert_contains     "${_FINSH_FILTERED[@]}" "pi-cat"    "Pass1: pi → pi-cat"
-_assert_contains     "${_FINSH_FILTERED[@]}" "pi"        "Pass1: pi → pi（精确匹配）"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "python"    "Pass1: 前缀 pi 不含 python"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "perl"      "Pass1: 前缀 pi 不含 perl"
+_assert_contains     "${_FINSH_FILTERED[@]}" "pi"        "Pass1: pi → pi (exact match)"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "python"    "Pass1: prefix 'pi' does not include python"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "perl"      "Pass1: prefix 'pi' does not include perl"
 
-print "\n── _finsh_filter: Pass 2a（substring）"
-# "claude" 在 pi-claude 中作为子串匹配；首字母预过滤要求以 'c' 开头的候选，
-# pi-claude 不以 'c' 开头 → Pass 2a 实际上被首字母预过滤截断
-# 正确用例：needle 首字母与候选首字母一致才触发 substring
+print "\n── _finsh_filter: Pass 2a (substring)"
+# "claude" is a substring of pi-claude, but the first-letter pre-filter requires
+# candidates to start with 'c' when needle starts with 'c'.
+# pi-claude does not start with 'c' → Pass 2a is blocked by the first-letter pre-filter.
+# Correct test case: needle's first letter must match the candidate's first letter.
 local -a _p2a=("pi-claude" "pi-cat" "cp-claude" "curl")
 _finsh_filter "cl" "${_p2a[@]}"
-_assert_contains     "${_FINSH_FILTERED[@]}" "cp-claude"  "Pass2a: cl(首字母c) substring → cp-claude"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2a: pi-claude 首字母 p ≠ c，预过滤排除"
+_assert_contains     "${_FINSH_FILTERED[@]}" "cp-claude"  "Pass2a: cl (first letter c) substring → cp-claude"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2a: pi-claude starts with p ≠ c, pre-filtered out"
 
-print "\n── _finsh_filter: Pass 2b（head-anchored subsequence）"
+print "\n── _finsh_filter: Pass 2b (head-anchored subsequence)"
 local -a _p2b=("pi-claude" "pi-cat" "python" "pi-clude")
 _finsh_filter "piclaud" "${_p2b[@]}"
 _assert_contains     "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2b: piclaud → pi-claude"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-cat"     "Pass2b: piclaud 不含 pi-cat（无 'laud'）"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "python"     "Pass2b: piclaud 不含 python"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-cat"     "Pass2b: piclaud does not match pi-cat (no 'laud')"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "python"     "Pass2b: piclaud does not match python"
 
-print "\n── _finsh_filter: Pass 2c（pure subsequence）"
+print "\n── _finsh_filter: Pass 2c (pure subsequence)"
 local -a _p2c=("pi-claude" "python" "perlclude")
 _finsh_filter "pclaud" "${_p2c[@]}"
 _assert_contains     "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2c: pclaud → pi-claude (*p*c*l*a*u*d*)"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "python"     "Pass2c: pclaud 不含 python（无 'claud'）"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "python"     "Pass2c: pclaud does not match python (no 'claud')"
 
-print "\n── _finsh_filter: 首字母预过滤"
+print "\n── _finsh_filter: first-letter pre-filter"
 local -a _p_pre=("python" "pi-claude" "apply" "pep")
 _finsh_filter "py" "${_p_pre[@]}"
-_assert_contains     "${_FINSH_FILTERED[@]}" "python"    "首字母过滤: py → python"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "apply"     "首字母过滤: apply 首字母 a，不在 py 候选里"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-claude" "首字母过滤: pi-claude 不含 'py' 前缀"
+_assert_contains     "${_FINSH_FILTERED[@]}" "python"    "first-letter filter: py → python"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "apply"     "first-letter filter: 'apply' starts with 'a', excluded"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-claude" "first-letter filter: pi-claude does not have 'py' prefix"
 
-print "\n── _finsh_filter: word 为空时 FILTERED 为空（调用方直接用原始 pool）"
+print "\n── _finsh_filter: empty word → FILTERED is empty (caller uses raw pool directly)"
 local -a _p_empty=("foo" "bar")
 _finsh_filter "" "${_p_empty[@]}"
-_assert_empty "${_FINSH_FILTERED[@]}" "_finsh_filter: word='' 时 FILTERED 为空"
+_assert_empty "${_FINSH_FILTERED[@]}" "_finsh_filter: word='' → FILTERED is empty"
 
-print "\n── _finsh_filter: 无匹配时 FILTERED 为空"
+print "\n── _finsh_filter: no match → FILTERED is empty"
 local -a _p_nm=("foo" "bar" "baz")
 _finsh_filter "px" "${_p_nm[@]}"
-_assert_empty "${_FINSH_FILTERED[@]}" "_finsh_filter: 无匹配（首字母 p 但无候选以 p 开头）"
+_assert_empty "${_FINSH_FILTERED[@]}" "_finsh_filter: no match (first letter p but no candidate starts with p)"
 
-print "\n── _finsh_filter: glob 元字符转义（--release 含连字符）"
+print "\n── _finsh_filter: glob metacharacter escaping (--release contains hyphens)"
 local -a _p_glob=("--release" "--debug" "--output")
 _finsh_filter "--rel" "${_p_glob[@]}"
-_assert_contains     "${_FINSH_FILTERED[@]}" "--release" "glob转义: --rel → --release"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "--debug"   "glob转义: --rel 不含 --debug"
+_assert_contains     "${_FINSH_FILTERED[@]}" "--release" "glob escape: --rel → --release"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "--debug"   "glob escape: --rel does not include --debug"
 
-print "\n── _finsh_filter: 路径 basename 过滤（模拟路径补全场景）"
+print "\n── _finsh_filter: path basename filtering (simulated path completion)"
 local -a _p_path=("finsh.zsh" "README.md" "DESIGN.md" "fzf-complete.sh")
 _finsh_filter "fi" "${_p_path[@]}"
-_assert_contains     "${_FINSH_FILTERED[@]}" "finsh.zsh" "路径: fi → finsh.zsh"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "README.md"            "路径: fi 不含 README.md"
-_assert_not_contains "${_FINSH_FILTERED[@]}" "fzf-complete.sh"      "路径: fi 不含 fzf-complete.sh（首字母 f 相同但 'fi' 不是子串）"
+_assert_contains     "${_FINSH_FILTERED[@]}" "finsh.zsh" "path: fi → finsh.zsh"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "README.md"            "path: fi does not include README.md"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "fzf-complete.sh"      "path: fi does not include fzf-complete.sh (same first letter f but 'fi' is not a substring)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 结果汇总
+# Summary
 # ─────────────────────────────────────────────────────────────────────────────
 print ""
 print "────────────────────────────────────────"
@@ -681,4 +686,4 @@ else
     print -P "%F{red}$_FAIL FAILED%f, $_PASS passed  (total $(( _PASS + _FAIL )))"
 fi
 print "────────────────────────────────────────"
-(( _FAIL == 0 ))   # 非零退出码表示有失败
+(( _FAIL == 0 ))   # non-zero exit code indicates failures
