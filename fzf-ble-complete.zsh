@@ -36,9 +36,118 @@ typeset -ga _BLE_FILTERED
 # --help 输出缓存（key=命令路径拼接，value=help 文本；同一 session 只解析一次）
 typeset -gA _BLE_HELP_CACHE
 
+# _ble_parse_help 的输出数组（避免 subshell）
+typeset -ga _BLE_PARSE_SUBCMDS   # 解析出的子命令列表
+typeset -ga _BLE_PARSE_OPTS      # 解析出的 --flag 列表
+
 # 历史自动建议状态
 typeset -g _BLE_SUGGESTION=""         # 当前建议后缀（POSTDISPLAY 内容）
 typeset -g _BLE_SUGGESTION_NEEDLE=""  # 上次搜索的 needle（避免重复搜索）
+
+# ── --help 输出解析 ────────────────────────────────────────────────────────────
+# 输入：$1 = --help 的原始输出文本
+# 输出：结果写入全局数组 _BLE_PARSE_SUBCMDS（子命令）和 _BLE_PARSE_OPTS（--flag 选项）
+#
+# 解析策略：单次扫描状态机，先分类后提取。
+#
+#   初始状态：flat（启发式，适用于无 section 的工具，如 git）
+#
+#   遇到以下 section header（行长 ≤ 40 chars、首字母开头）时切换状态：
+#     *commands* / *subcommands* → subcmds（提取缩进子命令）
+#     *options*  / *flags*       → opts   （提取 --flag）
+#     纯大写 USAGE: / ARGS: 等    → other  （整段跳过）
+#
+#   行长上限 40 用于过滤掉长描述句（如 git 的
+#   "These are common Git commands used in various situations:"），
+#   避免把句子里的 "commands" 当成 section header 处罚。
+#
+#   各状态提取规则：
+#     subcmds – 1-8 空格缩进 + 小写首词（section 限定，不需要额外启发）
+#               逗号列表（npm/cargo 的 "build, b  compile" 风格）同样支持
+#     opts    – --flag 行（带或不带 -x, 前缀）
+#     other   – 跳过全部行
+#     flat    – 同时提取 --flag 和子命令
+#               子命令要求 2-8 空格缩进 + 名称后 2+ 空格间距，
+#               过滤 "  hx [FLAGS]..." 类 USAGE 行（名称后只有 1 空格）
+#
+#   已验证工具：
+#     section-based: zig(2sp)  cargo(4sp,comma)  npm(comma)
+#                    docker(multi-section)  hx(FLAGS:/USAGE:)
+#     flat:          git(3sp, 无 section header)
+_ble_parse_help() {
+    emulate -L zsh
+    setopt extendedglob
+    local _help_out="$1"
+    _BLE_PARSE_SUBCMDS=()
+    _BLE_PARSE_OPTS=()
+    [[ -z "$_help_out" ]] && return
+
+    local _section="flat"
+    local _line _lc _part
+    while IFS= read -r _line; do
+
+        # ── Section header detection ─────────────────────────────────────────
+        # 条件：行长 ≤ 40（过滤长句）且首字符为字母
+        if (( ${#_line} <= 40 )) && [[ "$_line" =~ '^[[:alpha:]]' ]]; then
+            _lc="${_line:l}"   # 转小写，实现大小写无关匹配
+            if   [[ "$_lc" =~ '(sub)?commands?[[:space:]]*:' ]]; then
+                _section="subcmds"; continue
+            elif [[ "$_lc" =~ '(options?|flags?)[[:space:]]*:' ]]; then
+                _section="opts";    continue
+            elif [[ "$_line" =~ '^[A-Z][A-Z -]*:' ]]; then
+                # 纯大写 header（USAGE: ARGS: EXAMPLES: 等）
+                _section="other";   continue
+            fi
+        fi
+
+        # ── Per-section extraction ───────────────────────────────────────────
+        case "$_section" in
+
+        subcmds)
+            # 逗号列表（npm/cargo 风格："  build, b  Compile..."）
+            if [[ "$_line" =~ '^[[:space:]]{1,8}[a-z][-a-z0-9]*,' ]]; then
+                for _part in "${(s:,:)_line[@]}"; do
+                    _part="${_part##[[:space:]]#}"
+                    _part="${_part%%[[:space:]]*}"
+                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _BLE_PARSE_SUBCMDS+=("$_part")
+                done
+            # 普通行：1-8 空格缩进 + 小写首词（section 已限定范围，规则简单）
+            elif [[ "$_line" =~ '^[[:space:]]{1,8}([a-z][-a-z0-9]*)' ]]; then
+                _BLE_PARSE_SUBCMDS+=("$match[1]")
+            fi
+            ;;
+
+        opts)
+            # --flag 行，带或不带 -x, 前缀
+            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
+                _BLE_PARSE_OPTS+=("--$match[4]")
+            fi
+            ;;
+
+        other) ;;   # USAGE: / ARGS: 等无关 section，整段跳过
+
+        flat)
+            # 启发式解析（无 section 工具，如 git）
+            # --flag 行
+            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
+                _BLE_PARSE_OPTS+=("--$match[4]")
+            # 逗号列表
+            elif [[ "$_line" =~ '^[[:space:]]{2,8}[a-z][-a-z0-9]*,' ]]; then
+                for _part in "${(s:,:)_line[@]}"; do
+                    _part="${_part##[[:space:]]#}"
+                    _part="${_part%%[[:space:]]*}"
+                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _BLE_PARSE_SUBCMDS+=("$_part")
+                done
+            # 普通行：2-8 空格缩进 + 名称后 2+ 空格间距
+            # 2+ 空格间距用于排除 "  cmd [ARG]..." 类 USAGE 行（名称后只有 1 空格）
+            elif [[ "$_line" =~ '^[[:space:]]{2,8}([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]]; then
+                _BLE_PARSE_SUBCMDS+=("$match[1]")
+            fi
+            ;;
+
+        esac
+    done <<< "$_help_out"
+}
 
 # ── 多级过滤函数 ──────────────────────────────────────────────────────────────
 # 结果写入全局 _BLE_FILTERED，避免 $(...) subshell 开销。
@@ -111,7 +220,7 @@ _ble_show_candidates() {
     done
     [[ -n "$line" ]] && out+=("$line")
 
-    zle -M "${(j:\n:)out}"
+    zle -M -- "${(j:\n:)out}"
 }
 
 # ── compadd 捕获实现 ───────────────────────────────────────────────────────────
@@ -272,60 +381,42 @@ _fzf_ble_complete() {
             }
             pool=( "${_FZF_BLE_POOL[@]}" )
             _FZF_BLE_POOL=()
+        fi
 
-        else
-            # ── 无注册补全函数：解析 $cmd [subcmd…] --help ───────────────────
-            # 根据 word 类型分流：
-            #   word 以 - 开头 → 收集 --flag 候选（选项）
-            #   否则           → 收集子命令候选
-            #
-            # 运行命令：取 prefix 中所有非 - 开头的词（去掉临时 flag），追加 --help
-            # 例：prefix="cargo build -v " → 运行 cargo build --help
-            if [[ -n "$_ble_cmd" ]]; then
-                local -a _ble_help_words=()
-                local _ble_w
-                for _ble_w in ${(Az)prefix}; do
-                    [[ "$_ble_w" == -* ]] || _ble_help_words+=("$_ble_w")
-                done
+        # ── compadd 未能捕获 或 无注册补全函数：解析 $cmd --help ─────────────
+        # 两种情况都走此路径：
+        #   ① 无注册补全函数（如 zig、hx 安装前）
+        #   ② 有注册函数但 hook 为空——最常见原因是补全函数使用了 _arguments，
+        #      其底层 comparguments builtin 绕过了 function-level compadd hook
+        #      （典型例子：_hx 用 _arguments -C，hx 选项无法被捕获）
+        if (( $#pool == 0 )) && [[ -n "$_ble_cmd" ]]; then
+            local -a _ble_help_words=()
+            local _ble_w
+            for _ble_w in ${(Az)prefix}; do
+                [[ "$_ble_w" == -* ]] || _ble_help_words+=("$_ble_w")
+            done
 
-                # 缓存 key = 命令词列表拼接，同一 session 相同子命令路径只 fork 一次
-                local _ble_cache_key="${(j: :)_ble_help_words}"
-                local _ble_help_out
-                if [[ -n "${_BLE_HELP_CACHE[$_ble_cache_key]+x}" ]]; then
-                    _ble_help_out="${_BLE_HELP_CACHE[$_ble_cache_key]}"
-                else
-                    _ble_help_out="$(command "${_ble_help_words[@]}" --help 2>&1)"
-                    _BLE_HELP_CACHE[$_ble_cache_key]="$_ble_help_out"
-                fi
+            # 缓存 key = 命令词列表拼接，同一 session 相同子命令路径只 fork 一次
+            local _ble_cache_key="${(j: :)_ble_help_words}"
+            local _ble_help_out
+            if [[ -n "${_BLE_HELP_CACHE[$_ble_cache_key]+x}" ]]; then
+                _ble_help_out="${_BLE_HELP_CACHE[$_ble_cache_key]}"
+            else
+                _ble_help_out="$(command "${_ble_help_words[@]}" --help 2>&1)"
+                _BLE_HELP_CACHE[$_ble_cache_key]="$_ble_help_out"
+            fi
 
-                if [[ -n "$_ble_help_out" ]]; then
-                    local _ble_help_line _ble_part
-                    local -a _ble_opts=() _ble_subcmds=()
-                    while IFS= read -r _ble_help_line; do
-                        # 选项行：  -x, --long  或       --long
-                        if [[ "$_ble_help_line" =~ \
-                            '^[[:space:]]+((-[a-zA-Z],?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
-                            _ble_opts+=("--$match[4]")
-                        # 子命令行：恰好 4 空格缩进，首词小写字母开头（非 -）
-                        # 支持逗号分隔多命令同行格式（如 npm --help 的 "All commands:" 段落）
-                        elif [[ "$_ble_help_line" =~ \
-                            '^    ([a-z][-a-z0-9]*)' ]]; then
-                            if [[ "$_ble_help_line" == *,* ]]; then
-                                for _ble_part in "${(s:,:)_ble_help_line[@]}"; do
-                                    _ble_part="${_ble_part//[[:space:]]/}"  # 去除所有空白
-                                    [[ "$_ble_part" =~ '^[a-z][-a-z0-9]*$' ]] && _ble_subcmds+=("$_ble_part")
-                                done
-                            else
-                                _ble_subcmds+=("$match[1]")
-                            fi
-                        fi
-                    done <<< "$_ble_help_out"
-
-                    if [[ "$word" == -* ]]; then
-                        pool=( "${_ble_opts[@]}" )
-                    else
-                        pool=( "${_ble_subcmds[@]}" )
-                    fi
+            if [[ -n "$_ble_help_out" ]]; then
+                _ble_parse_help "$_ble_help_out"
+                if [[ "$word" == -* ]]; then
+                    pool=( "${_BLE_PARSE_OPTS[@]}" )
+                elif (( $#_BLE_PARSE_SUBCMDS )); then
+                    pool=( "${_BLE_PARSE_SUBCMDS[@]}" )
+                elif (( $#_BLE_PARSE_OPTS )); then
+                    # 无子命令但有选项（如 node、hx）
+                    # 把 opts 纳入 pool；word 非空时补 -- 前缀，使 "bu" 能匹配 "--build-sea"
+                    pool=( "${_BLE_PARSE_OPTS[@]}" )
+                    [[ -n "$word" ]] && word="--${word}"
                 fi
             fi
         fi

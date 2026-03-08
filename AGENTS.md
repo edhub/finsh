@@ -46,7 +46,20 @@ fzf-ble-complete/
 
 ### 静默退出 vs fallback → [DESIGN.md § pool 为空时的回退策略](DESIGN.md#pool-为空时的回退策略)
 
-- 有注册补全函数但 pool 为空 → 静默退出；无注册函数 → fallback `zle complete-word`（Bug 7）
+- 有注册补全函数但 pool 为空 → **先降级到 `--help` 路径**，help 也无结果才静默退出
+- 无注册函数且 help 也无结果 → fallback `zle complete-word`（Bug 7 / Bug 15）
+- `_arguments` 类补全函数（如 `_hx`）用 `comparguments` C builtin，**绕过** function-level compadd hook，pool 永远为空，需靠降级路径兜底（Bug 15）
+
+### opts-only 工具路由 → [DESIGN.md § 无子命令但有选项时的路由](DESIGN.md#无子命令但有选项时的路由opts-only-工具)
+
+- subcmds 为空但 opts 非空时，word 不以 `-` 开头也路由到 opts 池（Bug 16）
+- 此时给 `word` 补 `"--"` 前缀：`"bu"` → `"--bu"` → 前缀匹配 `--build-sea`
+- `_BLE_PFX` 不变，候选直接替换原始 word
+
+### `zle -M` 消息以 `-` 开头 → [DESIGN.md § Bug 17](DESIGN.md#bug-17--node--btabtab-第二次-tab-报错-zle24-bad-option--b)
+
+- `zle -M "msg"` 在消息以 `-` 开头时，`zle` 把消息内容解析为自己的 option，报 `bad option`（Bug 17）
+- 规律：**凡是 `zle -M` 的消息内容可能以 `-` 开头，都应写 `zle -M -- "msg"`**
 
 ### 历史自动建议 → [DESIGN.md § 历史自动建议](DESIGN.md#历史自动建议)
 
