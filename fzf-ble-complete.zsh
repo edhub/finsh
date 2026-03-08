@@ -9,10 +9,12 @@
 #   Pass 2c – pure subsequence      "pclaud"  → pi-claude  (*p*c*l*a*u*d*)
 #
 # 补全行为：
-#   首次 Tab  – fuzzy 过滤 → 内联填入第一个候选，zle -M 展示候选列表
-#   再次 Tab  – 弹出 fzf inline popup，从候选列表中交互选择
+#   首次 Tab  – fuzzy 过滤 → zle -M 展示候选列表，不填入（show 模式）
+#   继续输入  – 实时重过滤候选列表（show 模式保持）
+#   再次 Tab  – 填入第一候选，进入 cycle 模式
+#   cycle Tab – 循环切换到下一个候选（环绕）
 #   Shift+Tab – 原生 zsh 补全（保留上下文感知行为）
-#   其他按键  – 自动接受当前候选，列表消失
+#   其他按键  – 接受当前候选，列表消失
 #
 # 补全场景：
 #   命令名   – 从 commands / functions / aliases / builtins 收集
@@ -25,12 +27,18 @@
 # （completion context 内调用的函数无法访问外层 widget 的 local 变量）
 typeset -ga _FZF_BLE_POOL
 
-# 补全状态（跨 widget 调用保持，由 $LASTWIDGET 判断是否延续）
-# 第 1 次 Tab：填入第一候选，zle -M 展示列表；第 2 次 Tab：弹出 fzf popup
+# 补全状态（跨 widget 调用保持）
+# 第 1 次 Tab：show 模式——展示列表不填入；继续输入→实时过滤；
+# 再次 Tab→填入第一候选（cycle 模式）；第 3 次 Tab→弹出 fzf popup
 typeset -ga _BLE_CANDS   # 当前补全的候选列表
-typeset -gi _BLE_IDX=0   # 当前选中索引（1-based）
-typeset -g  _BLE_PFX=""  # 候选词之前的内容（LBUFFER 前缀）
+typeset -gi _BLE_IDX=0   # 当前选中索引（1-based；show 模式下为 0）
+typeset -g  _BLE_PFX=""  # 候选词之前的内容（LBUFFER 前缀，show 模式期间固定不变）
 typeset -g  _BLE_WORD="" # 发起补全时用户输入的原始词（fzf popup query 用）
+
+# show 模式状态（首次 Tab 进入，再次 Tab 退出并填入）
+typeset -gi _BLE_SHOW_MODE=0      # 1=show-without-fill 模式
+typeset -ga _BLE_SHOW_POOL=()     # show 模式完整候选池（供用户继续输入时重过滤）
+typeset -g  _BLE_SHOW_WORD_PFX="" # 过滤前缀（opts-only 工具需在当前词前加 "--"）
 
 # _ble_filter 的输出数组（避免 subshell，直接在全局数组中写结果）
 typeset -ga _BLE_FILTERED
@@ -345,8 +353,10 @@ _ble_try_path() {
     _BLE_CANDS=( "${show[@]}" )
     _BLE_PFX="${_prefix}${sep}"
     _BLE_WORD="$base"
-    _BLE_IDX=1
-    LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
+    _BLE_IDX=0
+    _BLE_SHOW_MODE=1
+    _BLE_SHOW_POOL=( "${names[@]}" )   # 保存完整文件名池，供继续输入时重过滤
+    _BLE_SHOW_WORD_PFX=""              # 路径补全无需词前缀变换
     _ble_show_candidates
     return 0
 }
@@ -437,35 +447,31 @@ _fzf_ble_complete() {
     emulate -L zsh
     setopt extendedglob nullglob
 
-    # ── 第 2 次 Tab：弹出 fzf inline popup ──────────────────────────────────
-    if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]] && (( $#_BLE_CANDS )) \
-        && [[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]; then
-
-        # 快照当前状态，清零全局避免 fzf 返回后状态污染
-        local pfx="${_BLE_PFX}" typed="${_BLE_WORD}"
-        local -a cands=("${_BLE_CANDS[@]}")
-        _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
-        zle -M ""
-
-        local selected
-        selected=$(printf '%s\n' "${cands[@]}" | fzf \
-            --height=~10 \
-            --layout=reverse \
-            --no-sort \
-            --query="$typed" \
-            --color='fg:#575F66,bg:#FAFAFA,hl:#399EE6' \
-            --color='fg+:#575F66,bg+:#EAE8E3,hl+:#399EE6,gutter:#FAFAFA' \
-            --color='border:#D9D8D7,prompt:#86B300,pointer:#F07171' \
-            2>/dev/null)
-
-        if [[ -n "$selected" ]]; then
-            LBUFFER="${pfx}${selected}"
-        fi
-        zle reset-prompt
+    # ── Tab in show mode：填入第一候选，进入 cycle 模式 ──────────────────────
+    # 不依赖 LASTWIDGET（show 模式期间用户可能已打了其他字符）
+    if (( _BLE_SHOW_MODE )) && (( $#_BLE_CANDS )); then
+        _BLE_SHOW_MODE=0
+        _BLE_SHOW_POOL=()
+        _BLE_SHOW_WORD_PFX=""
+        _BLE_IDX=1
+        LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
+        _ble_show_candidates
         return
     fi
 
-    # ── 新一轮补全：重置循环状态 ─────────────────────────────────────────────
+    # ── Tab in cycle 模式：循环到下一个候选 ────────────────────────────────
+    if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]] && (( $#_BLE_CANDS )) \
+        && [[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]; then
+        _BLE_IDX=$(( (_BLE_IDX % $#_BLE_CANDS) + 1 ))
+        LBUFFER="${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}"
+        _ble_show_candidates
+        return
+    fi
+
+    # ── 新一轮补全：重置所有状态 ─────────────────────────────────────────────
+    _BLE_SHOW_MODE=0
+    _BLE_SHOW_POOL=()
+    _BLE_SHOW_WORD_PFX=""
     _BLE_CANDS=()
     _BLE_IDX=0
     _BLE_PFX=""
@@ -497,6 +503,7 @@ _fzf_ble_complete() {
 
     local -a pool=()
     local _ble_registered=0
+    local raw_word="$word"   # 保存 _ble_collect_subcmd_pool 修改前的原始词
 
     # ── 命令名补全 ────────────────────────────────────────────────────────────
     if [[ "$prefix" =~ '^[[:space:]]*$' ]]; then
@@ -514,6 +521,10 @@ _fzf_ble_complete() {
         _ble_registered=$_BLE_REG_TMP
         word="$_BLE_WORD_TMP"
     fi
+
+    # opts-only 工具会在 word 前加 "--"（如 "bu" → "--bu"），记录前缀供 show 模式重过滤用
+    _BLE_SHOW_WORD_PFX=""
+    (( ${#word} > ${#raw_word} )) && _BLE_SHOW_WORD_PFX="${word[1,${#word}-${#raw_word}]}"
 
     pool=( ${(u)pool} )   # 去重
 
@@ -543,12 +554,15 @@ _fzf_ble_complete() {
         return
     fi
 
-    # ── 填入第一个候选，启动补全模式，展示候选列表 ───────────────────────────
+    # ── 进入 show 模式：展示候选列表，不填入任何候选 ────────────────────────
+    # 用户可继续输入以实时过滤；再次 Tab → 填入第一候选（cycle 模式）
     _BLE_CANDS=( "${show[@]}" )
     _BLE_PFX="$prefix"
     _BLE_WORD="$word"
-    _BLE_IDX=1
-    LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
+    _BLE_IDX=0
+    _BLE_SHOW_MODE=1
+    _BLE_SHOW_POOL=( "${pool[@]}" )   # 保存去重后的完整候选池
+    # LBUFFER 保持不变
     _ble_show_candidates
 }
 
@@ -637,12 +651,66 @@ zle -N accept-line _ble_accept_line
 _ble_pre_redraw() {
     emulate -L zsh
     if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]]; then
-        # 补全循环期间：清除建议显示，保留候选菜单
+        # 补全循环期间（含首次 Tab 进入 show 模式）：清除建议，保留候选菜单
         POSTDISPLAY=""
         region_highlight=( ${region_highlight:#*memo=ble-sug} )
         return
     fi
+
+    # ── Show 模式：用户继续输入时实时重过滤候选列表 ───────────────────────────
+    if (( _BLE_SHOW_MODE )) && (( $#_BLE_SHOW_POOL )); then
+        # 提取当前词：去掉固定的 _BLE_PFX 前缀部分
+        local _sm_cur_word=""
+        if [[ "${LBUFFER[1,${#_BLE_PFX}]}" == "$_BLE_PFX" ]]; then
+            _sm_cur_word="${LBUFFER[${#_BLE_PFX}+1,-1]}"
+        else
+            # 用户回删进了前缀区域：退出 show 模式
+            _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
+            _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+            zle -M ""
+            _ble_update_suggestion
+            return
+        fi
+
+        # 当前词不足 2 个字符：退出 show 模式（触发条件：用户回删）
+        if (( ${#_sm_cur_word} < 2 )); then
+            _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
+            _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+            zle -M ""
+            _ble_update_suggestion
+            return
+        fi
+
+        # 应用 opts-only 工具的 "--" 前缀（使 "bu" 能匹配 "--build"）
+        local _sm_filter_word="${_BLE_SHOW_WORD_PFX}${_sm_cur_word}"
+
+        _ble_filter "$_sm_filter_word" "${_BLE_SHOW_POOL[@]}"
+        local -a _sm_show
+        if (( $#_BLE_FILTERED )); then
+            _sm_show=("${_BLE_FILTERED[@]}")
+        elif [[ -z "$_sm_filter_word" ]]; then
+            _sm_show=("${_BLE_SHOW_POOL[@]}")
+        else
+            # 无匹配：退出 show 模式，清除候选列表
+            _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
+            _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+            zle -M ""
+            _ble_update_suggestion
+            return
+        fi
+
+        # 更新候选列表并展示（_BLE_IDX=0 → 无方括号高亮，show 模式下无选中项）
+        _BLE_CANDS=( "${_sm_show[@]}" )
+        _BLE_IDX=0
+        _BLE_WORD="$_sm_cur_word"
+        POSTDISPLAY=""
+        region_highlight=( ${region_highlight:#*memo=ble-sug} )
+        _ble_show_candidates
+        return
+    fi
+
     if (( $#_BLE_CANDS )); then
+        _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
         _BLE_CANDS=()
         _BLE_IDX=0
         _BLE_PFX=""
@@ -659,3 +727,4 @@ bindkey '^I'   _fzf_ble_complete   # Tab
 bindkey '^[[Z' complete-word       # Shift+Tab 保留原生补全
 bindkey '^[[C' _ble_autosuggest_accept   # 右方向键（大多数终端）
 bindkey '^[OC' _ble_autosuggest_accept   # 右方向键（部分终端）
+bindkey '^F'   _ble_autosuggest_accept   # Ctrl+F（emacs forward-char，语义等价）
