@@ -4,7 +4,7 @@
 
 ---
 
-## 匹配优先级（`_ble_filter`）
+## 匹配优先级（`_finsh_filter`）
 
 逐级降级，命中即停止。**所有 pass 在运行前都会先按首字母预过滤**（候选首字母必须与 word[1] 相同），避免纯 subsequence 在大型候选池中命中大量不相关条目。
 
@@ -19,8 +19,8 @@
 所有 pass 用 `${(b)word}` 转义 glob 元字符后再匹配，防止 `--release` 等含特殊字符的词出问题。
 
 > ⚠️ **修改注意**
-> - 结果写入全局 `_BLE_FILTERED`（不开 subshell），glob 匹配中用 `${(b)word}` 转义元字符，任何修改都要保持一致
-> - word 为空时 `_BLE_FILTERED` 置空，调用方直接用原始 pool
+> - 结果写入全局 `_FINSH_FILTERED`（不开 subshell），glob 匹配中用 `${(b)word}` 转义元字符，任何修改都要保持一致
+> - word 为空时 `_FINSH_FILTERED` 置空，调用方直接用原始 pool
 > - **首字母预过滤不得移除**：`pool=( ${(M)pool:#${(b)word[1]}*} )`，否则 Pass 2c 的纯 subsequence 会在大型候选池中命中大量无关条目（Pass 2a 的跨首字母 substring 匹配也随之消失，属预期行为——输入 `claude` 应补全以 `c` 开头的东西）
 
 ---

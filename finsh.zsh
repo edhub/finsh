@@ -1,6 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# fzf-ble-complete.zsh
-# ble.sh 风格的多级 fuzzy 补全 widget，绑定到 Tab 键
+# finsh.zsh — Fish-inspired fuzzy tab completion for zsh
+#
+# 灵感来源：Fish shell 的补全体验 + ble.sh 的实现思路
+# 核心思路：在 ZLE 层自行收集原始候选，完全绕过 zsh 的前缀过滤截断
 #
 # 匹配优先级（逐级降级，命中即停止）：
 #   Pass 1  – 精确前缀              "pi"      → pi-claude
@@ -23,45 +25,58 @@
 #   路径     – glob 当前目录层，按文件名部分过滤
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── 自动初始化补全系统 ────────────────────────────────────────────────────────
+# 若 compinit 尚未运行（$_comps 为空），自动完成初始化。
+# macOS 上自动将 Homebrew 补全目录（_docker、_gh 等）加入 fpath。
+() {
+    [[ -n "${_comps-}" ]] && return   # compinit 已运行，跳过
+    if [[ "$OSTYPE" == darwin* ]]; then
+        local _site="${HOMEBREW_PREFIX:-/opt/homebrew}/share/zsh/site-functions"
+        [[ -d "$_site" ]] && (( ! ${fpath[(I)$_site]} )) && fpath=("$_site" $fpath)
+    fi
+    autoload -Uz compinit
+    compinit -d ~/.zcompdump
+}
+
 # compadd hook 的全局暂存区
 # （completion context 内调用的函数无法访问外层 widget 的 local 变量）
-typeset -ga _FZF_BLE_POOL
+typeset -ga _FINSH_POOL
 
 # 补全状态（跨 widget 调用保持）
 # 第 1 次 Tab：show 模式——展示列表不填入；继续输入→实时过滤；
-# 再次 Tab→填入第一候选（cycle 模式）；第 3 次 Tab→弹出 fzf popup
-typeset -ga _BLE_CANDS   # 当前补全的候选列表
-typeset -gi _BLE_IDX=0   # 当前选中索引（1-based；show 模式下为 0）
-typeset -g  _BLE_PFX=""  # 候选词之前的内容（LBUFFER 前缀，show 模式期间固定不变）
-typeset -g  _BLE_WORD="" # 发起补全时用户输入的原始词（fzf popup query 用）
+# 再次 Tab→填入第一候选（cycle 模式）
+typeset -ga _FINSH_CANDS   # 当前补全的候选列表
+typeset -gi _FINSH_IDX=0   # 当前选中索引（1-based；show 模式下为 0）
+typeset -g  _FINSH_PFX=""  # 候选词之前的内容（LBUFFER 前缀，show 模式期间固定不变）
+typeset -g  _FINSH_WORD="" # 发起补全时用户输入的原始词
 
 # show 模式状态（首次 Tab 进入，再次 Tab 退出并填入）
-typeset -gi _BLE_SHOW_MODE=0      # 1=show-without-fill 模式
-typeset -ga _BLE_SHOW_POOL=()     # show 模式完整候选池（供用户继续输入时重过滤）
-typeset -g  _BLE_SHOW_WORD_PFX="" # 过滤前缀（opts-only 工具需在当前词前加 "--"）
+typeset -gi _FINSH_SHOW_MODE=0      # 1=show-without-fill 模式
+typeset -ga _FINSH_SHOW_POOL=()     # show 模式完整候选池（供用户继续输入时重过滤）
+typeset -g  _FINSH_SHOW_WORD_PFX="" # 过滤前缀（opts-only 工具需在当前词前加 "--"）
 
-# _ble_filter 的输出数组（避免 subshell，直接在全局数组中写结果）
-typeset -ga _BLE_FILTERED
+# _finsh_filter 的输出数组（避免 subshell，直接在全局数组中写结果）
+typeset -ga _FINSH_FILTERED
 
 # --help 输出缓存（key=命令路径拼接，value=help 文本；同一 session 只解析一次）
-typeset -gA _BLE_HELP_CACHE
+typeset -gA _FINSH_HELP_CACHE
 
-# _ble_parse_help 的输出数组（避免 subshell）
-typeset -ga _BLE_PARSE_SUBCMDS   # 解析出的子命令列表
-typeset -ga _BLE_PARSE_OPTS      # 解析出的 --flag 列表
+# _finsh_parse_help 的输出数组（避免 subshell）
+typeset -ga _FINSH_PARSE_SUBCMDS   # 解析出的子命令列表
+typeset -ga _FINSH_PARSE_OPTS      # 解析出的 --flag 列表
 
 # 历史自动建议状态
-typeset -g _BLE_SUGGESTION=""         # 当前建议后缀（POSTDISPLAY 内容）
-typeset -g _BLE_SUGGESTION_NEEDLE=""  # 上次搜索的 needle（避免重复搜索）
+typeset -g _FINSH_SUGGESTION=""         # 当前建议后缀（POSTDISPLAY 内容）
+typeset -g _FINSH_SUGGESTION_NEEDLE=""  # 上次搜索的 needle（避免重复搜索）
 
-# _ble_collect_subcmd_pool 的输出变量（避免 subshell）
-typeset -ga _BLE_POOL_TMP=()   # 收集到的候选池
-typeset -gi _BLE_REG_TMP=0     # 是否有注册补全函数（0/1）
-typeset -g  _BLE_WORD_TMP=""   # 可能被修改的 word（opts-only 工具补 "--" 前缀）
+# _finsh_collect_subcmd_pool 的输出变量（避免 subshell）
+typeset -ga _FINSH_POOL_TMP=()   # 收集到的候选池
+typeset -gi _FINSH_REG_TMP=0     # 是否有注册补全函数（0/1）
+typeset -g  _FINSH_WORD_TMP=""   # 可能被修改的 word（opts-only 工具补 "--" 前缀）
 
 # ── --help 输出解析 ────────────────────────────────────────────────────────────
 # 输入：$1 = --help 的原始输出文本
-# 输出：结果写入全局数组 _BLE_PARSE_SUBCMDS（子命令）和 _BLE_PARSE_OPTS（--flag 选项）
+# 输出：结果写入全局数组 _FINSH_PARSE_SUBCMDS（子命令）和 _FINSH_PARSE_OPTS（--flag 选项）
 #
 # 解析策略：单次扫描状态机，先分类后提取。
 #
@@ -89,12 +104,12 @@ typeset -g  _BLE_WORD_TMP=""   # 可能被修改的 word（opts-only 工具补 "
 #     section-based: zig(2sp)  cargo(4sp,comma)  npm(comma)
 #                    docker(multi-section)  hx(FLAGS:/USAGE:)
 #     flat:          git(3sp, 无 section header)
-_ble_parse_help() {
+_finsh_parse_help() {
     emulate -L zsh
     setopt extendedglob
     local _help_out="$1"
-    _BLE_PARSE_SUBCMDS=()
-    _BLE_PARSE_OPTS=()
+    _FINSH_PARSE_SUBCMDS=()
+    _FINSH_PARSE_OPTS=()
     [[ -z "$_help_out" ]] && return
 
     local _section="flat"
@@ -129,18 +144,18 @@ _ble_parse_help() {
                 for _part in "${(s:,:)_aliases_part[@]}"; do
                     _part="${_part##[[:space:]]#}"
                     _part="${_part%%[[:space:]]*}"
-                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _BLE_PARSE_SUBCMDS+=("$_part")
+                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
                 done
             # 普通行：1-8 空格缩进 + 小写首词（section 已限定范围，规则简单）
             elif [[ "$_line" =~ '^[[:space:]]{1,8}([a-z][-a-z0-9]*)' ]]; then
-                _BLE_PARSE_SUBCMDS+=("$match[1]")
+                _FINSH_PARSE_SUBCMDS+=("$match[1]")
             fi
             ;;
 
         opts)
             # --flag 行，带或不带 -x, 前缀（-[a-zA-Z0-9]+ 支持 -nv, -nc, -4 等多字符短选项）
             if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
-                _BLE_PARSE_OPTS+=("--$match[4]")
+                _FINSH_PARSE_OPTS+=("--$match[4]")
             fi
             ;;
 
@@ -150,7 +165,7 @@ _ble_parse_help() {
             # 启发式解析（无 section 工具，如 git）
             # --flag 行
             if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
-                _BLE_PARSE_OPTS+=("--$match[4]")
+                _FINSH_PARSE_OPTS+=("--$match[4]")
             # 逗号列表
             elif [[ "$_line" =~ '^[[:space:]]{2,8}[a-z][-a-z0-9]*,' ]]; then
                 local _trimmed="${_line##[[:space:]]#}"
@@ -158,12 +173,12 @@ _ble_parse_help() {
                 for _part in "${(s:,:)_aliases_part[@]}"; do
                     _part="${_part##[[:space:]]#}"
                     _part="${_part%%[[:space:]]*}"
-                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _BLE_PARSE_SUBCMDS+=("$_part")
+                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
                 done
             # 普通行：2-8 空格缩进 + 名称后 2+ 空格间距
             # 2+ 空格间距用于排除 "  cmd [ARG]..." 类 USAGE 行（名称后只有 1 空格）
             elif [[ "$_line" =~ '^[[:space:]]{2,8}([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]]; then
-                _BLE_PARSE_SUBCMDS+=("$match[1]")
+                _FINSH_PARSE_SUBCMDS+=("$match[1]")
             fi
             ;;
 
@@ -172,13 +187,13 @@ _ble_parse_help() {
 }
 
 # ── 多级过滤函数 ──────────────────────────────────────────────────────────────
-# 结果写入全局 _BLE_FILTERED，避免 $(...) subshell 开销。
-# word 为空时 _BLE_FILTERED 置空，调用方应直接使用原始 pool。
-_ble_filter() {
+# 结果写入全局 _FINSH_FILTERED，避免 $(...) subshell 开销。
+# word 为空时 _FINSH_FILTERED 置空，调用方应直接使用原始 pool。
+_finsh_filter() {
     emulate -L zsh
     local word="$1"; shift
     local -a pool=("$@")
-    _BLE_FILTERED=()
+    _FINSH_FILTERED=()
 
     [[ -z "$word" ]] && return
 
@@ -192,11 +207,11 @@ _ble_filter() {
 
     # Pass 1 ── 精确前缀
     r=( ${(M)pool:#${~w}*} )
-    if (( $#r )); then _BLE_FILTERED=( "${r[@]}" ); return; fi
+    if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
     # Pass 2a ── substring
     r=( ${(M)pool:#*${~w}*} )
-    if (( $#r )); then _BLE_FILTERED=( "${r[@]}" ); return; fi
+    if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
     # Pass 2b ── head-anchored subsequence（首字母字面匹配，其余 subsequence）
     local tail="*" i
@@ -207,30 +222,30 @@ _ble_filter() {
         [[ "${c[1]}" == "${word[1]}" ]] || continue
         [[ "${c[2,-1]}" == ${~tail}  ]] && r+=("$c")
     done
-    if (( $#r )); then _BLE_FILTERED=( "${r[@]}" ); return; fi
+    if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
     # Pass 2c ── pure subsequence
     local seq="*"
     for (( i = 1; i <= $#word; i++ )); do seq+="${(b)word[i]}*"; done
-    _BLE_FILTERED=( ${(M)pool:#${~seq}} )
+    _FINSH_FILTERED=( ${(M)pool:#${~seq}} )
 }
 
 # ── 候选列表展示 ──────────────────────────────────────────────────────────────
 # 用 zle -M 在提示符下方展示所有候选；当前项用 [方括号] 标记。
 # 超过终端宽度时自动换行。
-_ble_show_candidates() {
+_finsh_show_candidates() {
     emulate -L zsh
     local cols=${COLUMNS:-80}
     local -a out=()
     local line="" line_vis_len=0 i item item_vis_len
 
-    for (( i = 1; i <= $#_BLE_CANDS; i++ )); do
-        item_vis_len=${#_BLE_CANDS[$i]}
-        if (( i == _BLE_IDX )); then
-            item="[${_BLE_CANDS[$i]}]"
+    for (( i = 1; i <= $#_FINSH_CANDS; i++ )); do
+        item_vis_len=${#_FINSH_CANDS[$i]}
+        if (( i == _FINSH_IDX )); then
+            item="[${_FINSH_CANDS[$i]}]"
             (( item_vis_len += 2 ))   # 两个方括号各占 1 列
         else
-            item="${_BLE_CANDS[$i]}"
+            item="${_FINSH_CANDS[$i]}"
         fi
 
         if [[ -z "$line" ]]; then
@@ -255,7 +270,7 @@ _ble_show_candidates() {
 #
 # 关键：compadd 只有在 zle -C 建立的 completion context 内才能被函数覆盖；
 # 从普通 widget 直接调 `zle complete-word` 时，补全系统走 C 层，跳过函数查找。
-_fzf_ble_capture() {
+_finsh_capture() {
     emulate -L zsh
     # 在 completion context 内覆盖 compadd，捕获候选词到全局暂存区
     # 注意：不调用 builtin compadd，避免候选写入 zsh completion buffer，
@@ -269,19 +284,19 @@ _fzf_ble_capture() {
                 # -O/-D/-A 是内部数组操作，跳过整个调用
                 -[ODA]) return 0 ;;
                 # -a/-k：展开数组/哈希键
-                -a)  (( i++ )); [[ -n "${@[i]}" ]] && _FZF_BLE_POOL+=( "${(@P)${@[i]}}" ) ;;
-                -k)  (( i++ )); [[ -n "${@[i]}" ]] && _FZF_BLE_POOL+=( "${(kP)${@[i]}}" ) ;;
+                -a)  (( i++ )); [[ -n "${@[i]}" ]] && _FINSH_POOL+=( "${(@P)${@[i]}}" ) ;;
+                -k)  (( i++ )); [[ -n "${@[i]}" ]] && _FINSH_POOL+=( "${(kP)${@[i]}}" ) ;;
                 # 带一个参数的 flag，跳过 flag+arg
                 # 对照 zsh manual compadd：-P -S -p -s -W -d -J -V -X -x -r -R -M -F -E -I -i
                 # 额外保留 -t -o（非标准但出现过），false positive 无害
                 -[PSpsWdJVXxrRMFtoEIi]) skip_next=1 ;;
                 # -- 之后全是候选词
-                --)  (( i++ )); _FZF_BLE_POOL+=( "${@[$i,-1]}" ); return 0 ;;
+                --)  (( i++ )); _FINSH_POOL+=( "${@[$i,-1]}" ); return 0 ;;
                 # 其他 flag（含组合 flag 如 -qS、-ld、-QS 等）
                 # 若其中含有需要跳过下一参数的字符，则 skip_next
                 -*)  [[ "${@[i]}" =~ '[PSpsWdJVXxrRMFtoEIi]' ]] && skip_next=1 ;;
                 # 实际候选词
-                *)   _FZF_BLE_POOL+=( "${@[i]}" ) ;;
+                *)   _FINSH_POOL+=( "${@[i]}" ) ;;
             esac
             (( i++ ))
         done
@@ -302,8 +317,8 @@ _fzf_ble_capture() {
 # ── 路径补全 ──────────────────────────────────────────────────────────────────
 # word 含 / 时调用。返回 0 表示已处理（widget 应 return），1 表示非路径词（继续）。
 # 读取：$1=word，$2=prefix（光标前的不变部分）
-# 写入：_BLE_CANDS / _BLE_PFX / _BLE_IDX / LBUFFER（ZLE 状态）
-_ble_try_path() {
+# 写入：_FINSH_CANDS / _FINSH_PFX / _FINSH_IDX / LBUFFER（ZLE 状态）
+_finsh_try_path() {
     emulate -L zsh
     setopt extendedglob nullglob
     local _word="$1" _prefix="$2"
@@ -335,11 +350,11 @@ _ble_try_path() {
 
     if (( $#names == 0 )); then zle complete-word; return 0; fi
 
-    _ble_filter "$base" "${names[@]}"
+    _finsh_filter "$base" "${names[@]}"
     # base 为空（word="dir/"）时展示目录下全部文件；有 base 但无匹配则展示全部（路径 pool 通常很小）
     local -a show
-    if (( $#_BLE_FILTERED )); then
-        show=("${_BLE_FILTERED[@]}")
+    if (( $#_FINSH_FILTERED )); then
+        show=("${_FINSH_FILTERED[@]}")
     else
         show=("${names[@]}")
     fi
@@ -350,132 +365,132 @@ _ble_try_path() {
         return 0
     fi
 
-    _BLE_CANDS=( "${show[@]}" )
-    _BLE_PFX="${_prefix}${sep}"
-    _BLE_WORD="$base"
-    _BLE_IDX=0
-    _BLE_SHOW_MODE=1
-    _BLE_SHOW_POOL=( "${names[@]}" )   # 保存完整文件名池，供继续输入时重过滤
-    _BLE_SHOW_WORD_PFX=""              # 路径补全无需词前缀变换
-    _ble_show_candidates
+    _FINSH_CANDS=( "${show[@]}" )
+    _FINSH_PFX="${_prefix}${sep}"
+    _FINSH_WORD="$base"
+    _FINSH_IDX=0
+    _FINSH_SHOW_MODE=1
+    _FINSH_SHOW_POOL=( "${names[@]}" )   # 保存完整文件名池，供继续输入时重过滤
+    _FINSH_SHOW_WORD_PFX=""              # 路径补全无需词前缀变换
+    _finsh_show_candidates
     return 0
 }
 
 # ── 子命令 / 选项候选收集 ──────────────────────────────────────────────────────
 # 输入：$1=word，$2=prefix（光标前缀）
 # 输出写入全局变量（避免 subshell）：
-#   _BLE_POOL_TMP  – 收集到的候选池
-#   _BLE_REG_TMP   – 是否有注册补全函数（0/1）
-#   _BLE_WORD_TMP  – 可能被修改的 word（opts-only 工具会加 "--" 前缀）
+#   _FINSH_POOL_TMP  – 收集到的候选池
+#   _FINSH_REG_TMP   – 是否有注册补全函数（0/1）
+#   _FINSH_WORD_TMP  – 可能被修改的 word（opts-only 工具会加 "--" 前缀）
 #
 # 三种情况都会尝试 --help 路径：
 #   ① 无注册补全函数（如 zig、hx 安装前）
 #   ② 有注册函数但 hook 为空——_arguments 底层 comparguments builtin 绕过 compadd hook
 #   ③ word 以 - 开头但 hook 捕获到的全是文件/URL 等非选项候选（如 _wget 的 _urls→_files）
-_ble_collect_subcmd_pool() {
+_finsh_collect_subcmd_pool() {
     emulate -L zsh
     local _word="$1" _prefix="$2"
-    _BLE_POOL_TMP=()
-    _BLE_REG_TMP=0
-    _BLE_WORD_TMP="$_word"
+    _FINSH_POOL_TMP=()
+    _FINSH_REG_TMP=0
+    _FINSH_WORD_TMP="$_word"
 
-    local _ble_cmd="${${(Az)_prefix}[1]-}"
+    local _cmd="${${(Az)_prefix}[1]-}"
 
-    if [[ -n "${_comps[$_ble_cmd]-}" ]]; then
+    if [[ -n "${_comps[$_cmd]-}" ]]; then
         # ── 有注册补全函数：走 zle -C 捕获路径 ──────────────────────────────
-        _BLE_REG_TMP=1
+        _FINSH_REG_TMP=1
         # 用 zle -C 建立正规 completion context，在此 context 内 compadd 可被函数覆盖
-        _FZF_BLE_POOL=()
-        zle -C _fzf_ble_cap complete-word _fzf_ble_capture
+        _FINSH_POOL=()
+        zle -C _finsh_cap complete-word _finsh_capture
         local slbuf=$LBUFFER srbuf=$RBUFFER
         {
             # 移除当前词，让 zsh 以空词在上下文中生成完整候选
             LBUFFER="$_prefix"
             RBUFFER=""
             CURSOR=${#LBUFFER}
-            zle _fzf_ble_cap 2>/dev/null
+            zle _finsh_cap 2>/dev/null
         } always {
             LBUFFER="$slbuf"
             RBUFFER="$srbuf"
-            zle -D _fzf_ble_cap 2>/dev/null
+            zle -D _finsh_cap 2>/dev/null
             unfunction compadd 2>/dev/null   # 防止异常退出时 compadd 残留
         }
-        _BLE_POOL_TMP=( "${_FZF_BLE_POOL[@]}" )
-        _FZF_BLE_POOL=()
+        _FINSH_POOL_TMP=( "${_FINSH_POOL[@]}" )
+        _FINSH_POOL=()
     fi
 
     # ── compadd 未能捕获 或 无注册补全函数：解析 $cmd --help ─────────────────
-    if [[ -n "$_ble_cmd" ]] && {
-        (( $#_BLE_POOL_TMP == 0 )) ||
-        { [[ "$_word" == -* ]] && (( ${#${(M)_BLE_POOL_TMP:#-*}} == 0 )) }
+    if [[ -n "$_cmd" ]] && {
+        (( $#_FINSH_POOL_TMP == 0 )) ||
+        { [[ "$_word" == -* ]] && (( ${#${(M)_FINSH_POOL_TMP:#-*}} == 0 )) }
     }; then
-        _BLE_POOL_TMP=()   # 丢弃无关候选（如文件名），准备用 --help 结果覆盖
-        local -a _ble_help_words=()
-        local _ble_w
-        for _ble_w in ${(Az)_prefix}; do
-            [[ "$_ble_w" == -* ]] || _ble_help_words+=("$_ble_w")
+        _FINSH_POOL_TMP=()   # 丢弃无关候选（如文件名），准备用 --help 结果覆盖
+        local -a _help_words=()
+        local _w
+        for _w in ${(Az)_prefix}; do
+            [[ "$_w" == -* ]] || _help_words+=("$_w")
         done
 
         # 缓存 key = 命令词列表拼接，同一 session 相同子命令路径只 fork 一次
-        local _ble_cache_key="${(j: :)_ble_help_words}"
-        local _ble_help_out
-        if [[ -n "${_BLE_HELP_CACHE[$_ble_cache_key]+x}" ]]; then
-            _ble_help_out="${_BLE_HELP_CACHE[$_ble_cache_key]}"
+        local _cache_key="${(j: :)_help_words}"
+        local _help_out
+        if [[ -n "${_FINSH_HELP_CACHE[$_cache_key]+x}" ]]; then
+            _help_out="${_FINSH_HELP_CACHE[$_cache_key]}"
         else
-            _ble_help_out="$(command "${_ble_help_words[@]}" --help 2>&1)"
-            _BLE_HELP_CACHE[$_ble_cache_key]="$_ble_help_out"
+            _help_out="$(command "${_help_words[@]}" --help 2>&1)"
+            _FINSH_HELP_CACHE[$_cache_key]="$_help_out"
         fi
 
-        if [[ -n "$_ble_help_out" ]]; then
-            _ble_parse_help "$_ble_help_out"
+        if [[ -n "$_help_out" ]]; then
+            _finsh_parse_help "$_help_out"
             if [[ "$_word" == -* ]]; then
-                _BLE_POOL_TMP=( "${_BLE_PARSE_OPTS[@]}" )
-            elif (( $#_BLE_PARSE_SUBCMDS )); then
-                _BLE_POOL_TMP=( "${_BLE_PARSE_SUBCMDS[@]}" )
-            elif (( $#_BLE_PARSE_OPTS )); then
+                _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
+            elif (( $#_FINSH_PARSE_SUBCMDS )); then
+                _FINSH_POOL_TMP=( "${_FINSH_PARSE_SUBCMDS[@]}" )
+            elif (( $#_FINSH_PARSE_OPTS )); then
                 # 无子命令但有选项（如 node、hx）
                 # 把 opts 纳入 pool；word 非空时补 -- 前缀，使 "bu" 能匹配 "--build-sea"
-                _BLE_POOL_TMP=( "${_BLE_PARSE_OPTS[@]}" )
-                [[ -n "$_word" ]] && _BLE_WORD_TMP="--${_word}"
+                _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
+                [[ -n "$_word" ]] && _FINSH_WORD_TMP="--${_word}"
             fi
         fi
     fi
 }
 
 # ── ZLE widget ────────────────────────────────────────────────────────────────
-_fzf_ble_complete() {
+_finsh_complete() {
     emulate -L zsh
     setopt extendedglob nullglob
 
     # ── Tab in show mode：填入第一候选，进入 cycle 模式 ──────────────────────
     # 不依赖 LASTWIDGET（show 模式期间用户可能已打了其他字符）
-    if (( _BLE_SHOW_MODE )) && (( $#_BLE_CANDS )); then
-        _BLE_SHOW_MODE=0
-        _BLE_SHOW_POOL=()
-        _BLE_SHOW_WORD_PFX=""
-        _BLE_IDX=1
-        LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
-        _ble_show_candidates
+    if (( _FINSH_SHOW_MODE )) && (( $#_FINSH_CANDS )); then
+        _FINSH_SHOW_MODE=0
+        _FINSH_SHOW_POOL=()
+        _FINSH_SHOW_WORD_PFX=""
+        _FINSH_IDX=1
+        LBUFFER="${_FINSH_PFX}${_FINSH_CANDS[1]}"
+        _finsh_show_candidates
         return
     fi
 
     # ── Tab in cycle 模式：循环到下一个候选 ────────────────────────────────
-    if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]] && (( $#_BLE_CANDS )) \
-        && [[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]; then
-        _BLE_IDX=$(( (_BLE_IDX % $#_BLE_CANDS) + 1 ))
-        LBUFFER="${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}"
-        _ble_show_candidates
+    if [[ "$LASTWIDGET" == "_finsh_complete" ]] && (( $#_FINSH_CANDS )) \
+        && [[ "$LBUFFER" == "${_FINSH_PFX}${_FINSH_CANDS[$_FINSH_IDX]}" ]]; then
+        _FINSH_IDX=$(( (_FINSH_IDX % $#_FINSH_CANDS) + 1 ))
+        LBUFFER="${_FINSH_PFX}${_FINSH_CANDS[$_FINSH_IDX]}"
+        _finsh_show_candidates
         return
     fi
 
     # ── 新一轮补全：重置所有状态 ─────────────────────────────────────────────
-    _BLE_SHOW_MODE=0
-    _BLE_SHOW_POOL=()
-    _BLE_SHOW_WORD_PFX=""
-    _BLE_CANDS=()
-    _BLE_IDX=0
-    _BLE_PFX=""
-    _BLE_WORD=""
+    _FINSH_SHOW_MODE=0
+    _FINSH_SHOW_POOL=()
+    _FINSH_SHOW_WORD_PFX=""
+    _FINSH_CANDS=()
+    _FINSH_IDX=0
+    _FINSH_PFX=""
+    _FINSH_WORD=""
 
     # 光标不在行尾时回退原生补全
     (( CURSOR != ${#BUFFER} )) && { zle complete-word; return }
@@ -494,7 +509,7 @@ _fzf_ble_complete() {
 
     # ── 路径补全 ──────────────────────────────────────────────────────────────
     if [[ "$word" == */* ]]; then
-        _ble_try_path "$word" "$prefix"
+        _finsh_try_path "$word" "$prefix"
         return
     fi
 
@@ -502,8 +517,8 @@ _fzf_ble_complete() {
     (( ${#word} >= 2 )) || return
 
     local -a pool=()
-    local _ble_registered=0
-    local raw_word="$word"   # 保存 _ble_collect_subcmd_pool 修改前的原始词
+    local _registered=0
+    local raw_word="$word"   # 保存 _finsh_collect_subcmd_pool 修改前的原始词
 
     # ── 命令名补全 ────────────────────────────────────────────────────────────
     if [[ "$prefix" =~ '^[[:space:]]*$' ]]; then
@@ -516,15 +531,15 @@ _fzf_ble_complete() {
 
     # ── 子命令 / 选项補全 ─────────────────────────────────────────────────────
     else
-        _ble_collect_subcmd_pool "$word" "$prefix"
-        pool=( "${_BLE_POOL_TMP[@]}" )
-        _ble_registered=$_BLE_REG_TMP
-        word="$_BLE_WORD_TMP"
+        _finsh_collect_subcmd_pool "$word" "$prefix"
+        pool=( "${_FINSH_POOL_TMP[@]}" )
+        _registered=$_FINSH_REG_TMP
+        word="$_FINSH_WORD_TMP"
     fi
 
     # opts-only 工具会在 word 前加 "--"（如 "bu" → "--bu"），记录前缀供 show 模式重过滤用
-    _BLE_SHOW_WORD_PFX=""
-    (( ${#word} > ${#raw_word} )) && _BLE_SHOW_WORD_PFX="${word[1,${#word}-${#raw_word}]}"
+    _FINSH_SHOW_WORD_PFX=""
+    (( ${#word} > ${#raw_word} )) && _FINSH_SHOW_WORD_PFX="${word[1,${#word}-${#raw_word}]}"
 
     pool=( ${(u)pool} )   # 去重
 
@@ -532,15 +547,15 @@ _fzf_ble_complete() {
         # 有注册补全函数但 pool 为空：函数跑了没结果（如 just 在无 justfile 目录）
         #   → 安静退出，不回退，避免再次触发 zle complete-word 产生错误补全
         # 无注册补全函数且 help 也无结果：才回退原生补全（通常做文件补全）
-        (( _ble_registered )) || zle complete-word
+        (( _registered )) || zle complete-word
         return
     fi
 
     # ── 多级过滤 ─────────────────────────────────────────────────────────────
-    _ble_filter "$word" "${pool[@]}"
+    _finsh_filter "$word" "${pool[@]}"
     local -a show
-    if (( $#_BLE_FILTERED )); then
-        show=("${_BLE_FILTERED[@]}")
+    if (( $#_FINSH_FILTERED )); then
+        show=("${_FINSH_FILTERED[@]}")
     elif [[ -z "$word" ]]; then
         show=("${pool[@]}")   # word 为空时展示全部（命令名列表等）
     else
@@ -556,22 +571,22 @@ _fzf_ble_complete() {
 
     # ── 进入 show 模式：展示候选列表，不填入任何候选 ────────────────────────
     # 用户可继续输入以实时过滤；再次 Tab → 填入第一候选（cycle 模式）
-    _BLE_CANDS=( "${show[@]}" )
-    _BLE_PFX="$prefix"
-    _BLE_WORD="$word"
-    _BLE_IDX=0
-    _BLE_SHOW_MODE=1
-    _BLE_SHOW_POOL=( "${pool[@]}" )   # 保存去重后的完整候选池
+    _FINSH_CANDS=( "${show[@]}" )
+    _FINSH_PFX="$prefix"
+    _FINSH_WORD="$word"
+    _FINSH_IDX=0
+    _FINSH_SHOW_MODE=1
+    _FINSH_SHOW_POOL=( "${pool[@]}" )   # 保存去重后的完整候选池
     # LBUFFER 保持不变
-    _ble_show_candidates
+    _finsh_show_candidates
 }
 
 # ── 历史自动建议 ──────────────────────────────────────────────────────────────
 # 在 $history 中从最近记录向前搜索第一条以 needle 开头且比 needle 更长的命令。
-# 结果写入全局 _BLE_SUGGESTION（避免 subshell 开销）。
-_ble_search_history() {
+# 结果写入全局 _FINSH_SUGGESTION（避免 subshell 开销）。
+_finsh_search_history() {
     local needle="$1"
-    _BLE_SUGGESTION=""
+    _FINSH_SUGGESTION=""
     [[ -z "$needle" ]] && return
 
     local -a nums
@@ -580,151 +595,151 @@ _ble_search_history() {
     for num in "${nums[@]}"; do
         entry="${history[$num]}"
         if [[ "$entry" == "${needle}"* ]] && [[ "$entry" != "$needle" ]]; then
-            _BLE_SUGGESTION="${entry#$needle}"
+            _FINSH_SUGGESTION="${entry#$needle}"
             return
         fi
     done
 }
 
 # POSTDISPLAY + region_highlight 刷新。
-# 补全循环中不更新（由 _ble_pre_redraw 清零）；光标不在行尾时隐藏；
+# 补全循环中不更新（由 _finsh_pre_redraw 清零）；光标不在行尾时隐藏；
 # LBUFFER 未变时直接复用缓存，避免每次 pre-redraw 都重新排序 $history。
-_ble_update_suggestion() {
+_finsh_update_suggestion() {
     emulate -L zsh
-    # 清除旧高亮（memo=ble-sug 标识本插件的条目）
-    region_highlight=( ${region_highlight:#*memo=ble-sug} )
+    # 清除旧高亮（memo=finsh-sug 标识本插件的条目）
+    region_highlight=( ${region_highlight:#*memo=finsh-sug} )
 
-    if (( $#_BLE_CANDS )) || (( CURSOR != ${#BUFFER} )); then
+    if (( $#_FINSH_CANDS )) || (( CURSOR != ${#BUFFER} )); then
         POSTDISPLAY=""
         return
     fi
 
     # LBUFFER 未变：复用缓存
-    if [[ "$LBUFFER" != "$_BLE_SUGGESTION_NEEDLE" ]]; then
-        _ble_search_history "$LBUFFER"
-        _BLE_SUGGESTION_NEEDLE="$LBUFFER"
+    if [[ "$LBUFFER" != "$_FINSH_SUGGESTION_NEEDLE" ]]; then
+        _finsh_search_history "$LBUFFER"
+        _FINSH_SUGGESTION_NEEDLE="$LBUFFER"
     fi
 
-    POSTDISPLAY="$_BLE_SUGGESTION"
-    if [[ -n "$_BLE_SUGGESTION" ]]; then
+    POSTDISPLAY="$_FINSH_SUGGESTION"
+    if [[ -n "$_FINSH_SUGGESTION" ]]; then
         local p=${#BUFFER}
-        region_highlight+=( "${p} $((p + ${#_BLE_SUGGESTION})) fg=8 memo=ble-sug" )
+        region_highlight+=( "${p} $((p + ${#_FINSH_SUGGESTION})) fg=8 memo=finsh-sug" )
     fi
 }
 
 # 右方向键：有建议时全量接受，否则退化为普通 forward-char。
-_ble_autosuggest_accept() {
+_finsh_autosuggest_accept() {
     emulate -L zsh
     if [[ -n "$POSTDISPLAY" ]]; then
         LBUFFER="${LBUFFER}${POSTDISPLAY}"
         POSTDISPLAY=""
-        region_highlight=( ${region_highlight:#*memo=ble-sug} )
-        _BLE_SUGGESTION=""
-        _BLE_SUGGESTION_NEEDLE="$LBUFFER"
+        region_highlight=( ${region_highlight:#*memo=finsh-sug} )
+        _FINSH_SUGGESTION=""
+        _FINSH_SUGGESTION_NEEDLE="$LBUFFER"
     else
         zle forward-char
     fi
 }
-zle -N _ble_autosuggest_accept
+zle -N _finsh_autosuggest_accept
 
 # ── 包装 accept-line：在最终渲染前清空建议 ────────────────────────────────────
 # zle-line-finish 触发时 ZLE 已完成最终渲染，清空 POSTDISPLAY 为时已晚；
 # 必须在 accept-line 被调用时立即清空，才能阻止灰色文字随行输出打印到终端。
-# 问题根因：accept-line 后 zle-line-pre-redraw 仍会触发一次 _ble_update_suggestion。
-# 若把 _BLE_SUGGESTION_NEEDLE 重置为 ""，update-sug 会判断 LBUFFER != needle，
+# 问题根因：accept-line 后 zle-line-pre-redraw 仍会触发一次 _finsh_update_suggestion。
+# 若把 _FINSH_SUGGESTION_NEEDLE 重置为 ""，update-sug 会判断 LBUFFER != needle，
 # 重新搜历史并把建议写回 POSTDISPLAY，灰色文字随最终渲染打印到终端。
 # 修复：将 needle 设为当前 LBUFFER（而非 ""），使 update-sug 命中缓存，
-# 复用已清空的 _BLE_SUGGESTION=""，POSTDISPLAY 保持为空。
-_ble_accept_line() {
+# 复用已清空的 _FINSH_SUGGESTION=""，POSTDISPLAY 保持为空。
+_finsh_accept_line() {
     emulate -L zsh
     POSTDISPLAY=""
-    region_highlight=( ${region_highlight:#*memo=ble-sug} )
-    _BLE_SUGGESTION=""
-    _BLE_SUGGESTION_NEEDLE="$LBUFFER"   # 锁定 needle，阻止 pre-redraw 重新搜历史
+    region_highlight=( ${region_highlight:#*memo=finsh-sug} )
+    _FINSH_SUGGESTION=""
+    _FINSH_SUGGESTION_NEEDLE="$LBUFFER"   # 锁定 needle，阻止 pre-redraw 重新搜历史
     zle .accept-line
 }
-zle -N accept-line _ble_accept_line
+zle -N accept-line _finsh_accept_line
 
 # ── 自动清除候选菜单 ──────────────────────────────────────────────────────────
 # zle-line-pre-redraw 在每次重绘前触发；若上一个 widget 不是本 widget，
 # 说明用户做了其他操作（Backspace、输入、方向键等），此时清除菜单和循环状态。
-_ble_pre_redraw() {
+_finsh_pre_redraw() {
     emulate -L zsh
-    if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]]; then
+    if [[ "$LASTWIDGET" == "_finsh_complete" ]]; then
         # 补全循环期间（含首次 Tab 进入 show 模式）：清除建议，保留候选菜单
         POSTDISPLAY=""
-        region_highlight=( ${region_highlight:#*memo=ble-sug} )
+        region_highlight=( ${region_highlight:#*memo=finsh-sug} )
         return
     fi
 
     # ── Show 模式：用户继续输入时实时重过滤候选列表 ───────────────────────────
-    if (( _BLE_SHOW_MODE )) && (( $#_BLE_SHOW_POOL )); then
-        # 提取当前词：去掉固定的 _BLE_PFX 前缀部分
+    if (( _FINSH_SHOW_MODE )) && (( $#_FINSH_SHOW_POOL )); then
+        # 提取当前词：去掉固定的 _FINSH_PFX 前缀部分
         local _sm_cur_word=""
-        if [[ "${LBUFFER[1,${#_BLE_PFX}]}" == "$_BLE_PFX" ]]; then
-            _sm_cur_word="${LBUFFER[${#_BLE_PFX}+1,-1]}"
+        if [[ "${LBUFFER[1,${#_FINSH_PFX}]}" == "$_FINSH_PFX" ]]; then
+            _sm_cur_word="${LBUFFER[${#_FINSH_PFX}+1,-1]}"
         else
             # 用户回删进了前缀区域：退出 show 模式
-            _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
-            _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+            _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
+            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
             zle -M ""
-            _ble_update_suggestion
+            _finsh_update_suggestion
             return
         fi
 
         # 当前词不足 2 个字符：退出 show 模式（触发条件：用户回删）
         if (( ${#_sm_cur_word} < 2 )); then
-            _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
-            _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+            _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
+            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
             zle -M ""
-            _ble_update_suggestion
+            _finsh_update_suggestion
             return
         fi
 
         # 应用 opts-only 工具的 "--" 前缀（使 "bu" 能匹配 "--build"）
-        local _sm_filter_word="${_BLE_SHOW_WORD_PFX}${_sm_cur_word}"
+        local _sm_filter_word="${_FINSH_SHOW_WORD_PFX}${_sm_cur_word}"
 
-        _ble_filter "$_sm_filter_word" "${_BLE_SHOW_POOL[@]}"
+        _finsh_filter "$_sm_filter_word" "${_FINSH_SHOW_POOL[@]}"
         local -a _sm_show
-        if (( $#_BLE_FILTERED )); then
-            _sm_show=("${_BLE_FILTERED[@]}")
+        if (( $#_FINSH_FILTERED )); then
+            _sm_show=("${_FINSH_FILTERED[@]}")
         elif [[ -z "$_sm_filter_word" ]]; then
-            _sm_show=("${_BLE_SHOW_POOL[@]}")
+            _sm_show=("${_FINSH_SHOW_POOL[@]}")
         else
             # 无匹配：退出 show 模式，清除候选列表
-            _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
-            _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+            _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
+            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
             zle -M ""
-            _ble_update_suggestion
+            _finsh_update_suggestion
             return
         fi
 
-        # 更新候选列表并展示（_BLE_IDX=0 → 无方括号高亮，show 模式下无选中项）
-        _BLE_CANDS=( "${_sm_show[@]}" )
-        _BLE_IDX=0
-        _BLE_WORD="$_sm_cur_word"
+        # 更新候选列表并展示（_FINSH_IDX=0 → 无方括号高亮，show 模式下无选中项）
+        _FINSH_CANDS=( "${_sm_show[@]}" )
+        _FINSH_IDX=0
+        _FINSH_WORD="$_sm_cur_word"
         POSTDISPLAY=""
-        region_highlight=( ${region_highlight:#*memo=ble-sug} )
-        _ble_show_candidates
+        region_highlight=( ${region_highlight:#*memo=finsh-sug} )
+        _finsh_show_candidates
         return
     fi
 
-    if (( $#_BLE_CANDS )); then
-        _BLE_SHOW_MODE=0; _BLE_SHOW_POOL=(); _BLE_SHOW_WORD_PFX=""
-        _BLE_CANDS=()
-        _BLE_IDX=0
-        _BLE_PFX=""
-        _BLE_WORD=""
+    if (( $#_FINSH_CANDS )); then
+        _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
+        _FINSH_CANDS=()
+        _FINSH_IDX=0
+        _FINSH_PFX=""
+        _FINSH_WORD=""
         zle -M ""
     fi
-    _ble_update_suggestion
+    _finsh_update_suggestion
 }
 autoload -Uz add-zle-hook-widget
-add-zle-hook-widget zle-line-pre-redraw _ble_pre_redraw
+add-zle-hook-widget zle-line-pre-redraw _finsh_pre_redraw
 
-zle -N _fzf_ble_complete
-bindkey '^I'   _fzf_ble_complete   # Tab
+zle -N _finsh_complete
+bindkey '^I'   _finsh_complete   # Tab
 bindkey '^[[Z' complete-word       # Shift+Tab 保留原生补全
-bindkey '^[[C' _ble_autosuggest_accept   # 右方向键（大多数终端）
-bindkey '^[OC' _ble_autosuggest_accept   # 右方向键（部分终端）
-bindkey '^F'   _ble_autosuggest_accept   # Ctrl+F（emacs forward-char，语义等价）
+bindkey '^[[C' _finsh_autosuggest_accept   # 右方向键（大多数终端）
+bindkey '^[OC' _finsh_autosuggest_accept   # 右方向键（部分终端）
+bindkey '^F'   _finsh_autosuggest_accept   # Ctrl+F（emacs forward-char，语义等价）

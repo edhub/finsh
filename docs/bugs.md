@@ -32,18 +32,18 @@
 
 ### Bug 5 — `cargo build --rel<tab>` 补全失败
 
-原因：`--rel` 以 `-` 开头，但 pool 来自 `_ble_subcmds`（空）。  
+原因：`--rel` 以 `-` 开头，但 pool 来自 `_FINSH_PARSE_SUBCMDS`（空）。  
 修法：help 解析时 word 以 `-` 开头则取选项行（`--flag` 格式）作为 pool。
 
-### Bug 12 — `npm in<tab>` 输出 `_ble_part=''` 杂项 + 遗漏 `install`
+### Bug 12 — `npm in<tab>` 输出 `_part=''` 杂项 + 遗漏 `install`
 
 原因（双重）：
 1. `npm --help` 的子命令以**逗号分隔平铺在同一行**（`    access, adduser, ..., install, ...`），旧逻辑只抓每行第一个词，`install` 等藏在行中间的命令全部丢失。
-2. 修复时 `local _ble_part` 声明写在 `while` 循环体内，每次进入逗号分支都重新执行一次 `typeset`，zle widget 上下文把初始化副作用 `_ble_part=''` 打印到终端。
+2. 修复时 `local _part` 声明写在 `while` 循环体内，每次进入逗号分支都重新执行一次 `typeset`，zle widget 上下文把初始化副作用 `_part=''` 打印到终端。
 
 修法：
 1. 子命令行含逗号时，按 `,` 拆分、去除空白、逐词校验 `'^[a-z][-a-z0-9]*$'`，全部加入 pool。
-2. 把 `local _ble_part` 提到 `while` 循环**外**，与 `_ble_help_line` 合并声明，`local` 只执行一次。
+2. 把 `local _part` 提到 `while` 循环**外**，与 `_help_line` 合并声明，`local` 只执行一次。
 
 ---
 
@@ -79,12 +79,12 @@ nums=( ${(Onk)history} )   # ✓ 得到 ("3" "2" "1")
 ### Bug 7 — `just <tab>` 无 justfile 时补全到 `=`（表象）
 
 原因：`_comps[just]=_just`，zle-C capture 运行，pool 为空，fallback `zle complete-word` 再次触发 `_just`，在真实 completion context 下将 `=` 作为 suffix 插入 buffer。  
-修法：引入 `_ble_registered` 标志，有注册补全函数但 pool 为空时**静默退出**，不 fallback。
+修法：引入 `_registered` 标志，有注册补全函数但 pool 为空时**静默退出**，不 fallback。
 
 ### Bug 9 — 循环模式误用旧状态
 
-原因：循环检查只看 `$LASTWIDGET` 和 `$#_BLE_CANDS`，不验证 buffer 位置。旧 bug 留下 `_BLE_CANDS=("=")` 后，下次 Tab 直接进循环复现旧问题。  
-修法：循环条件加 `[[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]`，buffer 不匹配则视为新一轮补全。
+原因：循环检查只看 `$LASTWIDGET` 和 `$#_FINSH_CANDS`，不验证 buffer 位置。旧 bug 留下 `_FINSH_CANDS=("=")` 后，下次 Tab 直接进循环复现旧问题。  
+修法：循环条件加 `[[ "$LBUFFER" == "${_FINSH_PFX}${_FINSH_CANDS[$_FINSH_IDX]}" ]]`，buffer 不匹配则视为新一轮补全。
 
 ---
 
@@ -93,16 +93,16 @@ nums=( ${(Onk)history} )   # ✓ 得到 ("3" "2" "1")
 ### Bug 10 — 输入 `picli` 时补全出大量无关候选
 
 原因：Pass 2c（pure subsequence）生成 `*p*i*c*l*i*`，在几千个命令的 pool 里能命中任意包含这五个字母（按序）的字符串。  
-修法：在 `_ble_filter` 所有 pass 运行前加首字母预过滤，pool 收窄到首字母与 `word[1]` 相同的候选：`pool=( ${(M)pool:#${(b)word[1]}*} )`。
+修法：在 `_finsh_filter` 所有 pass 运行前加首字母预过滤，pool 收窄到首字母与 `word[1]` 相同的候选：`pool=( ${(M)pool:#${(b)word[1]}*} )`。
 
 ### Bug 11 — 无匹配时 dump 全 pool
 
-原因：`_BLE_FILTERED` 为空时，`show` fallback 到完整 pool，几千条候选全部展示。  
+原因：`_FINSH_FILTERED` 为空时，`show` fallback 到完整 pool，几千条候选全部展示。  
 修法：主 widget 中 word 非空但无匹配时直接 return，只有 word 为空时才展示全 pool。
 
 ```zsh
-if (( $#_BLE_FILTERED )); then
-    show=("${_BLE_FILTERED[@]}")
+if (( $#_FINSH_FILTERED )); then
+    show=("${_FINSH_FILTERED[@]}")
 elif [[ -z "$word" ]]; then
     show=("${pool[@]}")
 else
@@ -120,19 +120,19 @@ fi
 
 根因（两层）：
 1. `zle-line-finish` 触发时序太晚——ZLE 已完成最终渲染并打印到终端，此时清空 `POSTDISPLAY` 为时已晚。
-2. 包装 `accept-line` 清空建议后，若把 `_BLE_SUGGESTION_NEEDLE` 重置为 `""`，随后触发的 `zle-line-pre-redraw` 会判断 `LBUFFER != needle`，重新搜历史，再次把建议写回 `POSTDISPLAY`，前功尽弃。
+2. 包装 `accept-line` 清空建议后，若把 `_FINSH_SUGGESTION_NEEDLE` 重置为 `""`，随后触发的 `zle-line-pre-redraw` 会判断 `LBUFFER != needle`，重新搜历史，再次把建议写回 `POSTDISPLAY`，前功尽弃。
 
-修法：包装 `accept-line`，清空建议后将 `_BLE_SUGGESTION_NEEDLE` 设为**当前 `$LBUFFER`**：
+修法：包装 `accept-line`，清空建议后将 `_FINSH_SUGGESTION_NEEDLE` 设为**当前 `$LBUFFER`**：
 
 ```zsh
-_ble_accept_line() {
+_finsh_accept_line() {
     POSTDISPLAY=""
-    region_highlight=( ${region_highlight:#*memo=ble-sug} )
-    _BLE_SUGGESTION=""
-    _BLE_SUGGESTION_NEEDLE="$LBUFFER"   # ← 锁定 needle，阻止 pre-redraw 重新搜历史
+    region_highlight=( ${region_highlight:#*memo=finsh-sug} )
+    _FINSH_SUGGESTION=""
+    _FINSH_SUGGESTION_NEEDLE="$LBUFFER"   # ← 锁定 needle，阻止 pre-redraw 重新搜历史
     zle .accept-line
 }
-zle -N accept-line _ble_accept_line
+zle -N accept-line _finsh_accept_line
 ```
 
 ---
@@ -143,10 +143,10 @@ zle -N accept-line _ble_accept_line
 
 现象：`hx` 有注册补全函数 `_hx`，但 `hx <Tab>` 什么都不显示。
 
-根因：`_hx` 使用 `_arguments -C`，其底层 `comparguments` 是 C builtin，**完全绕过** function-level `compadd` hook。`_FZF_BLE_POOL` 永远为空，`_ble_registered=1` 且 pool 为空 → 静默退出。
+根因：`_hx` 使用 `_arguments -C`，其底层 `comparguments` 是 C builtin，**完全绕过** function-level `compadd` hook。`_FINSH_POOL` 永远为空，`_registered=1` 且 pool 为空 → 静默退出。
 
 ```
-zle -C → _fzf_ble_capture → function compadd() { ... } → _main_complete
+zle -C → _finsh_capture → function compadd() { ... } → _main_complete
                                                           → _hx
                                                           → _arguments -C
                                                           → comparguments (C builtin)
@@ -156,13 +156,13 @@ zle -C → _fzf_ble_capture → function compadd() { ... } → _main_complete
 修法：将 `--help` 解析从 `else` 分支提出，改为 `if (( $#pool == 0 )) && ...`，使有注册函数但 hook 为空时也走 `--help` 路径：
 
 ```zsh
-if [[ -n "${_comps[$_ble_cmd]-}" ]]; then
-    _ble_registered=1
+if [[ -n "${_comps[$_cmd]-}" ]]; then
+    _registered=1
     # ... zle -C capture ...
-    pool=( "${_FZF_BLE_POOL[@]}" )
+    pool=( "${_FINSH_POOL[@]}" )
 fi
 # compadd 未能捕获 或 无注册函数 → 降级到 --help
-if (( $#pool == 0 )) && [[ -n "$_ble_cmd" ]]; then
+if (( $#pool == 0 )) && [[ -n "$_cmd" ]]; then
     # ... --help 解析 ...
 fi
 ```
@@ -171,17 +171,17 @@ fi
 
 现象：`node --help` 有 181 个选项，但 `node bu<Tab>` 什么都不补全。
 
-根因：`word = "bu"` 不以 `-` 开头 → 路由到 `_BLE_PARSE_SUBCMDS` pool → node 无子命令 → pool 为空 → fallback 文件补全 → 无匹配。
+根因：`word = "bu"` 不以 `-` 开头 → 路由到 `_FINSH_PARSE_SUBCMDS` pool → node 无子命令 → pool 为空 → fallback 文件补全 → 无匹配。
 
 修法：subcmds 为空但 opts 非空时，把 opts 纳入 pool，并给 `word` 补 `--` 前缀：
 - `"bu"` → `"--bu"` → 前缀匹配 `--build-sea`、`--build-snapshot`、`--build-snapshot-config`
-- `_BLE_PFX` 仍为 `"node "`，候选直接替换原始 `"bu"`，LBUFFER 变为 `"node --build-sea"`
+- `_FINSH_PFX` 仍为 `"node "`，候选直接替换原始 `"bu"`，LBUFFER 变为 `"node --build-sea"`
 
 ### Bug 17 — `node -b<Tab><Tab>` 第二次 Tab 报错 `zle:24: bad option: -b`
 
-现象：第一次 Tab 正常（LBUFFER → `node --build-sea`），第二次 Tab 报错 `_ble_show_candidates:zle:24: bad option: -b`。
+现象：第一次 Tab 正常（LBUFFER → `node --build-sea`），第二次 Tab 报错 `_finsh_show_candidates:zle:24: bad option: -b`。
 
-根因：`_ble_show_candidates` 最后一行是 `zle -M "${(j:\n:)out}"`。候选列表格式化后第一行形如 `"--build-sea  [--build-snapshot]  ..."` 以 `-` 开头。`zle` 的选项解析器把这个字符串解析为选项，其中 `-b` 被识别为 "bad option"。
+根因：`_finsh_show_candidates` 最后一行是 `zle -M "${(j:\n:)out}"`。候选列表格式化后第一行形如 `"--build-sea  [--build-snapshot]  ..."` 以 `-` 开头。`zle` 的选项解析器把这个字符串解析为选项，其中 `-b` 被识别为 "bad option"。
 
 ```zsh
 # 出错：zle 把 "--build-sea ..." 里的 -b 当成 zle 自己的选项
@@ -247,12 +247,12 @@ for _part in "${(s:,:)_aliases_part[@]}"; do ...
 根因：`_wget` 用 `_arguments` 声明了 `'*:URL:_urls'`。在 zle -C 补全上下文中，`_arguments` 会为位置参数调用 `_urls → _files → compadd`，我们的 hook 捕获到当前目录的文件名（`AGENTS.md`、`README.md` 等）。此时：
 
 1. `$#pool != 0`（pool 有文件名）→ 原条件 `$#pool == 0` 为假 → 跳过 `--help` 路径
-2. `_ble_filter "-hel" ["AGENTS.md" "README.md" ...]` → 首字母预过滤 `-*`：无文件以 `-` 开头 → pool 清空 → 静默退出
+2. `_finsh_filter "-hel" ["AGENTS.md" "README.md" ...]` → 首字母预过滤 `-*`：无文件以 `-` 开头 → pool 清空 → 静默退出
 
 修法：增加第三个进入 `--help` 路径的条件：`word` 以 `-` 开头但 pool 中没有任何 `-*` 候选（即 pool 全是非选项内容），此时丢弃 pool 并走 `--help`：
 
 ```zsh
-if [[ -n "$_ble_cmd" ]] && {
+if [[ -n "$_cmd" ]] && {
     (( $#pool == 0 )) ||
     { [[ "$word" == -* ]] && (( ${#${(M)pool:#-*}} == 0 )) }
 }; then

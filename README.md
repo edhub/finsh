@@ -1,25 +1,77 @@
-# fzf-ble-complete
+# finsh
 
-ble.sh 风格的多级 fuzzy 补全 widget，绑定到 Tab 键。
+> 读作 **"finish"** — `fin`（鱼鳍，致敬 Fish shell）+ `sh`（shell），中间的 `i` 故意省略
 
-**解决的核心问题**：fzf-tab 在收到候选之前，zsh 已用前缀过滤截断了列表，
-导致 `piclaud` 无法匹配 `pi-claude`。本项目在 ZLE 层完全自行收集候选，绕过 zsh 过滤。
+Fish shell 带来了一种「所见即所得」的补全体验——候选始终可见，模糊匹配让任意片段都能命中目标。
+用过之后再回到 zsh 的 Tab，总觉得少了什么。
+
+[ble.sh](https://github.com/akinomyoga/ble.sh) 证明了在 Bash 里复刻这种体验是可能的。
+于是 **finsh** 诞生了——把同样的补全哲学带给 macOS 上的 zsh 用户。
+
+---
+
+## 核心解决的问题
+
+`fzf-tab` 等方案的候选来自 zsh 原生补全——zsh 已用**精确前缀**过滤了一遍：
+输入 `piclaud` 想匹配 `pi-claude`，zsh 先把不以 `piclaud` 开头的候选全砍掉，
+fzf 拿到的是空列表。
+
+finsh 在 **ZLE 层**自行收集原始候选，完全绕过 zsh 的前缀截断。
+
+---
+
+## 特性
+
+- **两段式补全**：第一次 Tab 展示候选列表（show 模式）；第二次 Tab 填入并循环切换
+- **实时重过滤**：show 模式下继续输入，候选列表实时更新，无需重新按 Tab
+- **多级 fuzzy 匹配**：前缀 → substring → head-anchored subsequence → pure subsequence
+- **历史自动建议**：灰色显示历史匹配后缀，`→` 一键接受
+- **路径补全**：含 dotfile，层级 glob，支持 `~` 展开
+- **子命令 / 选项补全**：优先用 zsh 注册的补全函数，自动降级到解析 `--help` 输出
 
 ---
 
 ## 安装
 
-```zsh
-# ~/.zshrc —— 顺序不能颠倒
-fpath=(/opt/homebrew/share/zsh/site-functions $fpath)   # homebrew 补全（_docker、_gh、_just …）
-autoload -Uz compinit
-compinit -d ~/.zcompdump
+### 手动
 
-source ~/.zsh/plugins/fzf-ble-complete.zsh
+```zsh
+mkdir -p ~/.zsh/plugins
+curl -fsSL https://raw.githubusercontent.com/edhub/finsh/main/finsh.zsh \
+    -o ~/.zsh/plugins/finsh.zsh
 ```
 
+在 `~/.zshrc` 中添加：
+
+```zsh
+source ~/.zsh/plugins/finsh.zsh
+```
+
+### zinit
+
+```zsh
+zinit light edhub/finsh
+```
+
+### Oh My Zsh
+
+```zsh
+git clone https://github.com/edhub/finsh \
+    ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/finsh
+```
+
+在 `~/.zshrc` 的 `plugins` 列表中添加 `finsh`：
+
+```zsh
+plugins=(... finsh)
+```
+
+---
+
+脚本会自动完成初始化：在 macOS 上自动将 Homebrew 补全目录加入 `fpath`，并在需要时运行 `compinit`。
+
 > **诊断**：子命令补全不工作时执行 `print $_comps[git]`。
-> 若为空说明 `compinit` 未运行或 fpath 未包含对应补全文件。
+> 若为空说明 Homebrew 未安装或补全文件缺失（`brew install zsh-completions`）。
 
 ---
 
@@ -27,51 +79,61 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 
 | 按键 | 行为 |
 |------|------|
-| `Tab`（第 1 次）| fuzzy 过滤 → 内联填入第一候选，底部展示候选列表 |
-| `Tab`（第 2 次）| 弹出 fzf inline popup，交互选择 |
+| `Tab`（第 1 次）| fuzzy 过滤 → 底部展示候选列表（show 模式） |
+| 继续输入 | 实时重过滤候选列表 |
+| `Tab`（第 2 次）| 填入第一候选，进入 cycle 模式 |
+| `Tab`（cycle 中）| 循环切换到下一候选 |
 | `Shift+Tab` | 原生 zsh 补全（保留上下文感知行为）|
-| `→` | 接受历史自动建议；无建议时退化为 forward-char |
+| `→` / `Ctrl+F` | 接受历史自动建议；无建议时退化为 forward-char |
 | 任意其他键 | 接受当前候选，列表消失 |
 
 ---
 
-## 两段式补全
+## Tab 补全行为
 
-### 第 1 次 Tab — 内联预览
+### 第 1 次 Tab — Show 模式
 
-按下 Tab 后立即将最佳匹配填入命令行，同时在底部展示所有候选：
-
-```
-❯ brew li
-[list]  link  linkage  livecheck
-```
-
-`[list]` 是当前内联填入的候选，直接敲其他键即可接受并继续输入。
-
-### 第 2 次 Tab — fzf Popup
-
-再次按 Tab 弹出 fzf inline popup，可视化交互选择：
+按下 Tab 后立即在底部展示所有候选，命令行内容**不变**，可以继续输入过滤：
 
 ```
 ❯ brew li
-  link
-  linkage
-> list
-  livecheck
-  4/4 ──────
-> li
+list  link  linkage  livecheck
 ```
 
-- 已预填第 1 次 Tab 时的输入词作为初始 query，可继续输入过滤
-- `Enter` 确认，`Esc` / `Ctrl-C` 取消（buffer 不变）
-- fzf 所有标准按键均可用（`Ctrl-P/N`、`Ctrl-J/K` 等）
+继续输入 `nk`：
 
-> **依赖**：fzf >= 0.35.0（`--height=~N` 语法需要此版本）
+```
+❯ brew link
+link  linkage
+```
 
-### 配色
+### 第 2 次 Tab — 填入并循环
 
-Popup 内置 ayu_light 配色。如需替换，在 `~/.zshrc` 中通过 `FZF_DEFAULT_OPTS` 覆盖，
-或 fork 后修改 `_fzf_ble_complete` 中的 `--color` 参数。
+再按 Tab 填入第一候选，进入 cycle 模式，继续按 Tab 循环切换：
+
+```
+❯ brew link
+[link]  linkage
+```
+
+```
+❯ brew linkage
+link  [linkage]
+```
+
+---
+
+## 匹配优先级
+
+所有 pass 运行前先按首字母预过滤，逐级降级，命中即停止：
+
+| Pass | 名称 | 示例 |
+|------|------|------|
+| pre | 首字母预过滤 | `pi…` 只在 `p` 开头的候选里跑 |
+| 1 | 精确前缀 | `pi` → `pi-claude` |
+| 2a | substring | `pi-cl` → `pi-claude` |
+| 2b | head-anchored subsequence | `piclaud` → `pi-claude` |
+| 2c | pure subsequence | `pclaud` → `pi-claude` |
 
 ---
 
@@ -87,25 +149,10 @@ Popup 内置 ayu_light 配色。如需替换，在 `~/.zshrc` 中通过 `FZF_DEF
 
 ---
 
-## 匹配优先级
-
-所有 pass 运行前先按首字母预过滤，逐级降级，命中即停止。详见 [DESIGN.md § 匹配优先级](DESIGN.md#匹配优先级_ble_filter)。
-
-| Pass | 名称 | 示例 |
-|------|------|------|
-| pre | 首字母预过滤 | `pi…` 只在 `p` 开头的候选里跑 |
-| 1 | 精确前缀 | `pi` → `pi-claude` |
-| 2a | substring | `pi-cl` → `pi-claude` |
-| 2b | head-anchored subsequence | `piclaud` → `pi-claude` |
-| 2c | pure subsequence | `pclaud` → `pi-claude` |
-
----
-
 ## 文件
 
 | 文件 | 说明 |
 |------|------|
-| `fzf-ble-complete.zsh` | 唯一实现文件 |
+| `finsh.zsh` | 唯一实现文件 |
 | `DESIGN.md` | 设计文档（架构、实现细节、Bug 历史）|
-| `AGENTS.md` | AI agent 上下文（约束清单、快速参考）|
-| `tests/test-help-parser.zsh` | `_ble_parse_help` 与 `_ble_filter` 单元测试 |
+| `tests/test-help-parser.zsh` | `_finsh_parse_help` 与 `_finsh_filter` 单元测试 |

@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # tests/test-help-parser.zsh
-# 测试 _ble_parse_help 函数的 help 输出解析逻辑，以及 _ble_filter 多级匹配逻辑
+# 测试 _finsh_parse_help 函数的 help 输出解析逻辑，以及 _finsh_filter 多级匹配逻辑
 #
 # 用法：
 #   zsh tests/test-help-parser.zsh
@@ -11,17 +11,17 @@ emulate -L zsh
 setopt extendedglob
 
 # ── 加载被测函数 ──────────────────────────────────────────────────────────────
-# 只 source 用到的全局变量声明和 _ble_parse_help / _ble_filter 函数；
-# 用 awk 截取到 "_ble_show_candidates" 定义前，避免加载 ZLE/widget 相关代码
+# 只 source 用到的全局变量声明和 _finsh_parse_help / _finsh_filter 函数；
+# 用 awk 截取到 "_finsh_show_candidates" 定义前，避免加载 ZLE/widget 相关代码
 # （ZLE 只在 interactive shell 中可用，测试环境无 zle 命令）
 _SCRIPT_DIR="${0:A:h}/.."
-typeset -ga _BLE_PARSE_SUBCMDS
-typeset -ga _BLE_PARSE_OPTS
-typeset -ga _BLE_FILTERED
+typeset -ga _FINSH_PARSE_SUBCMDS
+typeset -ga _FINSH_PARSE_OPTS
+typeset -ga _FINSH_FILTERED
 source <(awk '
-    /^_ble_parse_help\(\)|^_ble_filter\(\)/ { in_fn=1; brace=0 }
+    /^_finsh_parse_help\(\)|^_finsh_filter\(\)/ { in_fn=1; brace=0 }
     in_fn { print; brace += gsub(/\{/,"{")-gsub(/\}/,"}"); if (brace==0 && NR>1) in_fn=0 }
-' "$_SCRIPT_DIR/fzf-ble-complete.zsh")
+' "$_SCRIPT_DIR/finsh.zsh")
 
 # ── 断言工具 ──────────────────────────────────────────────────────────────────
 typeset -gi _PASS=0 _FAIL=0
@@ -70,7 +70,7 @@ _assert_empty() {
 run_test() {
     local name="$1" help_text="$2"
     print "\n── $name"
-    _ble_parse_help "$help_text"
+    _finsh_parse_help "$help_text"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,18 +104,18 @@ General Options:
   -h, --help       Print command-specific usage
   --color [auto|off|on]    Enable or disable colored error messages'
 
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "build"     "zig: build"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "run"       "zig: run"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "build-exe" "zig: build-exe (带连字符)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "ast-check" "zig: ast-check (带连字符)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "fmt"       "zig: fmt"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "cc"        "zig: cc (两字母)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "version"   "zig: version"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--help"    "zig: --help 选项"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--color"   "zig: --color 选项"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "zig: build"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run"       "zig: run"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build-exe" "zig: build-exe (带连字符)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "ast-check" "zig: ast-check (带连字符)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "fmt"       "zig: fmt"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "cc"        "zig: cc (两字母)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "version"   "zig: version"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--help"    "zig: --help 选项"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--color"   "zig: --color 选项"
 # 描述文字不应被误匹配（首字母大写，已被 [a-z] 排除）
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "Build"   "zig: 描述词 'Build' 不应入池"
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "Print"   "zig: 描述词 'Print' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Build"   "zig: 描述词 'Build' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Print"   "zig: 描述词 'Print' 不应入池"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 2: git --help（3 空格缩进，分区标题行插入）
@@ -148,15 +148,15 @@ collaborate (see also: git help workflows)
    pull       Fetch from and integrate with another repository or a local branch
    push       Update remote refs along with associated objects'
 
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "clone"   "git: clone"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "init"    "git: init"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "add"     "git: add"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "commit"  "git: commit"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "push"    "git: push"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "switch"  "git: switch"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "clone"   "git: clone"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "init"    "git: init"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "add"     "git: add"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "commit"  "git: commit"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "push"    "git: push"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "switch"  "git: switch"
 # 分区标题行（无缩进）不应匹配
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "start"       "git: 分区标题 'start' 不应入池"
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "collaborate" "git: 分区标题 'collaborate' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "start"       "git: 分区标题 'start' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "collaborate" "git: 分区标题 'collaborate' 不应入池"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 3: cargo --help（4 空格缩进，逗号别名 "build, b"）
@@ -190,20 +190,20 @@ Commands:
     uninstall   Uninstall a Rust binary
     ...         See all commands with --list'
 
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "build"     "cargo: build"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "b"         "cargo: b (build 的别名)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "check"     "cargo: check"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "c"         "cargo: c (check 的别名)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "clean"     "cargo: clean"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "install"   "cargo: install"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--version" "cargo: --version 选项"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--list"    "cargo: --list 选项（无短格式）"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--quiet"   "cargo: --quiet 选项"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--offline" "cargo: --offline 选项"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "cargo: build"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "b"         "cargo: b (build 的别名)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "check"     "cargo: check"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "c"         "cargo: c (check 的别名)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "clean"     "cargo: clean"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "install"   "cargo: install"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "cargo: --version 选项"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--list"    "cargo: --list 选项（无短格式）"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--quiet"   "cargo: --quiet 选项"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--offline" "cargo: --offline 选项"
 # "..." 不应入池（不匹配 [a-z][-a-z0-9]*）
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "..."  "cargo: '...' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "..."  "cargo: '...' 不应入池"
 # Bug 18：描述文字里的逗号不应切出假词
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "but"  "cargo Bug18: 描述里的 'but' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "but"  "cargo Bug18: 描述里的 'but' 不应入池"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 4: npm --help（4 空格缩进，多行逗号列表）
@@ -220,13 +220,13 @@ All commands:
     ping, publish, query, rebuild, run, search,
     test, token, uninstall, update, version, view, whoami'
 
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "access"    "npm: access"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "install"   "npm: install"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "publish"   "npm: publish"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "test"      "npm: test"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "whoami"    "npm: whoami (最后一个词)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "dist-tag"  "npm: dist-tag (带连字符)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "run"       "npm: run"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "access"    "npm: access"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "install"   "npm: install"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "publish"   "npm: publish"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "test"      "npm: test"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "whoami"    "npm: whoami (最后一个词)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "dist-tag"  "npm: dist-tag (带连字符)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run"       "npm: run"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 5: docker --help（2 空格缩进，带 * 后缀的行）
@@ -262,17 +262,17 @@ Global Options:
       --log-level string   Set the logging level
   -v, --version            Print version information and quit'
 
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "run"       "docker: run"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "build"     "docker: build"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "ps"        "docker: ps (两字母)"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "buildx"    "docker: buildx（* 后缀应被截断）"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "container" "docker: container"
-_assert_contains "${_BLE_PARSE_SUBCMDS[@]}" "logs"      "docker: logs"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--config"  "docker: --config 选项"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--debug"   "docker: --debug 选项"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--version" "docker: --version 选项"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run"       "docker: run"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "docker: build"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "ps"        "docker: ps (两字母)"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "buildx"    "docker: buildx（* 后缀应被截断）"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "container" "docker: container"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "logs"      "docker: logs"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--config"  "docker: --config 选项"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--debug"   "docker: --debug 选项"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version" "docker: --version 选项"
 # "buildx*" 不应整体入池
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "buildx*" "docker: 'buildx*' 不应整体入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "buildx*" "docker: 'buildx*' 不应整体入池"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 6: hx --help（clap 风格，USAGE:/ARGS:/FLAGS: 纯大写 section，无子命令）
@@ -309,22 +309,22 @@ FLAGS:
     +N                             Open the first given file at line number N'
 
 # 选项全部应被捕获
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--help"        "hx: --help"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--tutor"       "hx: --tutor"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--health"      "hx: --health"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--grammar"     "hx: --grammar"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--config"      "hx: --config"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--log"         "hx: --log"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--version"     "hx: --version"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--vsplit"      "hx: --vsplit"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--hsplit"      "hx: --hsplit"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--working-dir" "hx: --working-dir"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--help"        "hx: --help"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--tutor"       "hx: --tutor"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--health"      "hx: --health"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--grammar"     "hx: --grammar"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--config"      "hx: --config"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--log"         "hx: --log"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version"     "hx: --version"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--vsplit"      "hx: --vsplit"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--hsplit"      "hx: --hsplit"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--working-dir" "hx: --working-dir"
 # hx 无子命令
-_assert_empty "${_BLE_PARSE_SUBCMDS[@]}"    "hx: 无子命令"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}"    "hx: 无子命令"
 # USAGE: 段内容不应误入子命令池（旧实现的假阳性）
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "hx" "hx: USAGE 行里的 'hx' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "hx" "hx: USAGE 行里的 'hx' 不应入池"
 # 35+ 空格续行里的 'or' 不应误入子命令池（旧实现的假阳性）
-_assert_not_contains "${_BLE_PARSE_SUBCMDS[@]}" "or" "hx: 续行里的 'or' 不应入池"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "or" "hx: 续行里的 'or' 不应入池"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 7: node --help（只有选项，无子命令；非 - 开头的 word 应匹配 --flag）
@@ -348,26 +348,26 @@ Options:
   --no-warnings               silence all process warnings
   --version                   print Node.js version'
 
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--build-sea"       "node: --build-sea"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--build-snapshot"  "node: --build-snapshot"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--inspect"         "node: --inspect"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--check"           "node: --check (有短格式 -c,)"
-_assert_contains "${_BLE_PARSE_OPTS[@]}"    "--version"         "node: --version"
-_assert_empty    "${_BLE_PARSE_SUBCMDS[@]}"                     "node: 无子命令"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--build-sea"       "node: --build-sea"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--build-snapshot"  "node: --build-snapshot"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--inspect"         "node: --inspect"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--check"           "node: --check (有短格式 -c,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version"         "node: --version"
+_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"                     "node: 无子命令"
 
 # 模拟 widget 路由：word="bu" → 补 -- 前缀后应匹配 --build-*
 local _word="bu" _pool=()
 if [[ "$_word" == -* ]]; then
-    _pool=( "${_BLE_PARSE_OPTS[@]}" )
-elif (( $#_BLE_PARSE_SUBCMDS )); then
-    _pool=( "${_BLE_PARSE_SUBCMDS[@]}" )
-elif (( $#_BLE_PARSE_OPTS )); then
-    _pool=( "${_BLE_PARSE_OPTS[@]}" )
+    _pool=( "${_FINSH_PARSE_OPTS[@]}" )
+elif (( $#_FINSH_PARSE_SUBCMDS )); then
+    _pool=( "${_FINSH_PARSE_SUBCMDS[@]}" )
+elif (( $#_FINSH_PARSE_OPTS )); then
+    _pool=( "${_FINSH_PARSE_OPTS[@]}" )
     [[ -n "$_word" ]] && _word="--${_word}"
 fi
-_ble_filter "$_word" "${_pool[@]}"
-_assert_contains "${_BLE_FILTERED[@]}" "--build-sea"      "node routing: 'bu' 匹配 --build-sea"
-_assert_contains "${_BLE_FILTERED[@]}" "--build-snapshot" "node routing: 'bu' 匹配 --build-snapshot"
+_finsh_filter "$_word" "${_pool[@]}"
+_assert_contains "${_FINSH_FILTERED[@]}" "--build-sea"      "node routing: 'bu' 匹配 --build-sea"
+_assert_contains "${_FINSH_FILTERED[@]}" "--build-snapshot" "node routing: 'bu' 匹配 --build-snapshot"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 8: wget --help（多字符短选项 -nv, -nc, -4, -6 — Bug 19）
@@ -393,28 +393,28 @@ Logging and input file:
   -v,  --verbose           be verbose (this is the default)
        --no-dns-cache      Disable caching DNS lookups.'
 
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--version"      "wget Bug19: --version (单字母短选项)"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--help"         "wget Bug19: --help"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--no-verbose"   "wget Bug19: --no-verbose (多字符短选项 -nv,)"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--no-clobber"   "wget Bug19: --no-clobber (多字符短选项 -nc,)"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--inet4-only"   "wget Bug19: --inet4-only (数字短选项 -4,)"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--inet6-only"   "wget Bug19: --inet6-only (数字短选项 -6,)"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--quiet"        "wget Bug19: --quiet"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--verbose"      "wget Bug19: --verbose"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--no-dns-cache" "wget Bug19: --no-dns-cache (无短格式)"
-_assert_empty    "${_BLE_PARSE_SUBCMDS[@]}"               "wget: 无子命令"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--version"      "wget Bug19: --version (单字母短选项)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--help"         "wget Bug19: --help"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-verbose"   "wget Bug19: --no-verbose (多字符短选项 -nv,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-clobber"   "wget Bug19: --no-clobber (多字符短选项 -nc,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--inet4-only"   "wget Bug19: --inet4-only (数字短选项 -4,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--inet6-only"   "wget Bug19: --inet6-only (数字短选项 -6,)"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--quiet"        "wget Bug19: --quiet"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--verbose"      "wget Bug19: --verbose"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--no-dns-cache" "wget Bug19: --no-dns-cache (无短格式)"
+_assert_empty    "${_FINSH_PARSE_SUBCMDS[@]}"               "wget: 无子命令"
 
 run_test "edge: 空输入" ""
 
-_assert_empty "${_BLE_PARSE_SUBCMDS[@]}" "空输入：subcmds 应为空"
-_assert_empty "${_BLE_PARSE_OPTS[@]}"    "空输入：opts 应为空"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "空输入：subcmds 应为空"
+_assert_empty "${_FINSH_PARSE_OPTS[@]}"    "空输入：opts 应为空"
 
 run_test "edge: 无缩进行不应匹配" \
 'build    compile the project
 run      run the project
 --help   show help'
 
-_assert_empty "${_BLE_PARSE_SUBCMDS[@]}" "无缩进：subcmds 应为空（缩进不足 2 空格）"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}" "无缩进：subcmds 应为空（缩进不足 2 空格）"
 
 run_test "edge: 纯选项（无子命令）" \
 'Options:
@@ -423,84 +423,84 @@ run_test "edge: 纯选项（无子命令）" \
       --dry-run    Dry run mode
   -o, --output <file>  Output file'
 
-_assert_empty "${_BLE_PARSE_SUBCMDS[@]}"    "纯选项：subcmds 应为空"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--verbose"  "纯选项: --verbose"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--quiet"    "纯选项: --quiet"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--dry-run"  "纯选项: --dry-run"
-_assert_contains "${_BLE_PARSE_OPTS[@]}" "--output"   "纯选项: --output"
+_assert_empty "${_FINSH_PARSE_SUBCMDS[@]}"    "纯选项：subcmds 应为空"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--verbose"  "纯选项: --verbose"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--quiet"    "纯选项: --quiet"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--dry-run"  "纯选项: --dry-run"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}" "--output"   "纯选项: --output"
 
 run_test "edge: 描述中含 -- 不应匹配为选项" \
 '  build    compile (use --release for optimized build)
   test     run tests'
 
-_assert_contains     "${_BLE_PARSE_SUBCMDS[@]}" "build"     "描述含--：build 正常入池"
-_assert_contains     "${_BLE_PARSE_SUBCMDS[@]}" "test"      "描述含--：test 正常入池"
-_assert_not_contains "${_BLE_PARSE_OPTS[@]}"    "--release" "描述含--：描述里的 --release 不入选项池"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "描述含--：build 正常入池"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "test"      "描述含--：test 正常入池"
+_assert_not_contains "${_FINSH_PARSE_OPTS[@]}"    "--release" "描述含--：描述里的 --release 不入选项池"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _ble_filter 单元测试
+# _finsh_filter 单元测试
 # ─────────────────────────────────────────────────────────────────────────────
 
-print "\n── _ble_filter: Pass 1（精确前缀）"
+print "\n── _finsh_filter: Pass 1（精确前缀）"
 local -a _p=("pi-claude" "pi-cat" "python" "pi" "perl")
-_ble_filter "pi" "${_p[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "pi-claude" "Pass1: pi → pi-claude"
-_assert_contains     "${_BLE_FILTERED[@]}" "pi-cat"    "Pass1: pi → pi-cat"
-_assert_contains     "${_BLE_FILTERED[@]}" "pi"        "Pass1: pi → pi（精确匹配）"
-_assert_not_contains "${_BLE_FILTERED[@]}" "python"    "Pass1: 前缀 pi 不含 python"
-_assert_not_contains "${_BLE_FILTERED[@]}" "perl"      "Pass1: 前缀 pi 不含 perl"
+_finsh_filter "pi" "${_p[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "pi-claude" "Pass1: pi → pi-claude"
+_assert_contains     "${_FINSH_FILTERED[@]}" "pi-cat"    "Pass1: pi → pi-cat"
+_assert_contains     "${_FINSH_FILTERED[@]}" "pi"        "Pass1: pi → pi（精确匹配）"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "python"    "Pass1: 前缀 pi 不含 python"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "perl"      "Pass1: 前缀 pi 不含 perl"
 
-print "\n── _ble_filter: Pass 2a（substring）"
+print "\n── _finsh_filter: Pass 2a（substring）"
 # "claude" 在 pi-claude 中作为子串匹配；首字母预过滤要求以 'c' 开头的候选，
 # pi-claude 不以 'c' 开头 → Pass 2a 实际上被首字母预过滤截断
 # 正确用例：needle 首字母与候选首字母一致才触发 substring
 local -a _p2a=("pi-claude" "pi-cat" "cp-claude" "curl")
-_ble_filter "cl" "${_p2a[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "cp-claude"  "Pass2a: cl(首字母c) substring → cp-claude"
-_assert_not_contains "${_BLE_FILTERED[@]}" "pi-claude"  "Pass2a: pi-claude 首字母 p ≠ c，预过滤排除"
+_finsh_filter "cl" "${_p2a[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "cp-claude"  "Pass2a: cl(首字母c) substring → cp-claude"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2a: pi-claude 首字母 p ≠ c，预过滤排除"
 
-print "\n── _ble_filter: Pass 2b（head-anchored subsequence）"
+print "\n── _finsh_filter: Pass 2b（head-anchored subsequence）"
 local -a _p2b=("pi-claude" "pi-cat" "python" "pi-clude")
-_ble_filter "piclaud" "${_p2b[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "pi-claude"  "Pass2b: piclaud → pi-claude"
-_assert_not_contains "${_BLE_FILTERED[@]}" "pi-cat"     "Pass2b: piclaud 不含 pi-cat（无 'laud'）"
-_assert_not_contains "${_BLE_FILTERED[@]}" "python"     "Pass2b: piclaud 不含 python"
+_finsh_filter "piclaud" "${_p2b[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2b: piclaud → pi-claude"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-cat"     "Pass2b: piclaud 不含 pi-cat（无 'laud'）"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "python"     "Pass2b: piclaud 不含 python"
 
-print "\n── _ble_filter: Pass 2c（pure subsequence）"
+print "\n── _finsh_filter: Pass 2c（pure subsequence）"
 local -a _p2c=("pi-claude" "python" "perlclude")
-_ble_filter "pclaud" "${_p2c[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "pi-claude"  "Pass2c: pclaud → pi-claude (*p*c*l*a*u*d*)"
-_assert_not_contains "${_BLE_FILTERED[@]}" "python"     "Pass2c: pclaud 不含 python（无 'claud'）"
+_finsh_filter "pclaud" "${_p2c[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "pi-claude"  "Pass2c: pclaud → pi-claude (*p*c*l*a*u*d*)"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "python"     "Pass2c: pclaud 不含 python（无 'claud'）"
 
-print "\n── _ble_filter: 首字母预过滤"
+print "\n── _finsh_filter: 首字母预过滤"
 local -a _p_pre=("python" "pi-claude" "apply" "pep")
-_ble_filter "py" "${_p_pre[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "python"    "首字母过滤: py → python"
-_assert_not_contains "${_BLE_FILTERED[@]}" "apply"     "首字母过滤: apply 首字母 a，不在 py 候选里"
-_assert_not_contains "${_BLE_FILTERED[@]}" "pi-claude" "首字母过滤: pi-claude 不含 'py' 前缀"
+_finsh_filter "py" "${_p_pre[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "python"    "首字母过滤: py → python"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "apply"     "首字母过滤: apply 首字母 a，不在 py 候选里"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "pi-claude" "首字母过滤: pi-claude 不含 'py' 前缀"
 
-print "\n── _ble_filter: word 为空时 FILTERED 为空（调用方直接用原始 pool）"
+print "\n── _finsh_filter: word 为空时 FILTERED 为空（调用方直接用原始 pool）"
 local -a _p_empty=("foo" "bar")
-_ble_filter "" "${_p_empty[@]}"
-_assert_empty "${_BLE_FILTERED[@]}" "_ble_filter: word='' 时 FILTERED 为空"
+_finsh_filter "" "${_p_empty[@]}"
+_assert_empty "${_FINSH_FILTERED[@]}" "_finsh_filter: word='' 时 FILTERED 为空"
 
-print "\n── _ble_filter: 无匹配时 FILTERED 为空"
+print "\n── _finsh_filter: 无匹配时 FILTERED 为空"
 local -a _p_nm=("foo" "bar" "baz")
-_ble_filter "px" "${_p_nm[@]}"
-_assert_empty "${_BLE_FILTERED[@]}" "_ble_filter: 无匹配（首字母 p 但无候选以 p 开头）"
+_finsh_filter "px" "${_p_nm[@]}"
+_assert_empty "${_FINSH_FILTERED[@]}" "_finsh_filter: 无匹配（首字母 p 但无候选以 p 开头）"
 
-print "\n── _ble_filter: glob 元字符转义（--release 含连字符）"
+print "\n── _finsh_filter: glob 元字符转义（--release 含连字符）"
 local -a _p_glob=("--release" "--debug" "--output")
-_ble_filter "--rel" "${_p_glob[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "--release" "glob转义: --rel → --release"
-_assert_not_contains "${_BLE_FILTERED[@]}" "--debug"   "glob转义: --rel 不含 --debug"
+_finsh_filter "--rel" "${_p_glob[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "--release" "glob转义: --rel → --release"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "--debug"   "glob转义: --rel 不含 --debug"
 
-print "\n── _ble_filter: 路径 basename 过滤（模拟路径补全场景）"
-local -a _p_path=("fzf-ble-complete.zsh" "README.md" "DESIGN.md" "fzf-complete.sh")
-_ble_filter "fzf-b" "${_p_path[@]}"
-_assert_contains     "${_BLE_FILTERED[@]}" "fzf-ble-complete.zsh" "路径: fzf-b → fzf-ble-complete.zsh"
-_assert_not_contains "${_BLE_FILTERED[@]}" "README.md"            "路径: fzf-b 不含 README.md"
-_assert_not_contains "${_BLE_FILTERED[@]}" "fzf-complete.sh"      "路径: fzf-b 不含 fzf-complete.sh（无 '-b'）"
+print "\n── _finsh_filter: 路径 basename 过滤（模拟路径补全场景）"
+local -a _p_path=("finsh.zsh" "README.md" "DESIGN.md" "fzf-complete.sh")
+_finsh_filter "fzf-b" "${_p_path[@]}"
+_assert_contains     "${_FINSH_FILTERED[@]}" "finsh.zsh" "路径: fzf-b → finsh.zsh"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "README.md"            "路径: fzf-b 不含 README.md"
+_assert_not_contains "${_FINSH_FILTERED[@]}" "fzf-complete.sh"      "路径: fzf-b 不含 fzf-complete.sh（无 '-b'）"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 结果汇总

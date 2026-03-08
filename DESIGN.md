@@ -1,4 +1,4 @@
-# fzf-ble-complete — 设计文档
+# finsh — 设计文档
 
 > 安装与快速上手见 [README.md](README.md)。
 
@@ -9,10 +9,10 @@
 ```
 Tab 键
  │
- ├─ 第 2 次 Tab：LASTWIDGET==本widget && _BLE_CANDS非空
- │               && LBUFFER==_BLE_PFX+_BLE_CANDS[_BLE_IDX]
+ ├─ 第 2 次 Tab：LASTWIDGET==本widget && _FINSH_CANDS非空
+ │               && LBUFFER==_FINSH_PFX+_FINSH_CANDS[_FINSH_IDX]
  │               → 弹出 fzf inline popup（--height=~10，ayu_light 配色）
- │                 以 _BLE_WORD（原始输入词）作为初始 query
+ │                 以 _FINSH_WORD（原始输入词）作为初始 query
  │
  └─ 新一轮补全
       │
@@ -31,8 +31,8 @@ Tab 键
            │
            └─ pool 为空 → 解析 $cmd [subcmd…] --help（状态机）
                 │
-                ├─ word 以 - 开头              → 选项池（_BLE_PARSE_OPTS）
-                ├─ 有子命令（_BLE_PARSE_SUBCMDS 非空） → 子命令池
+                ├─ word 以 - 开头              → 选项池（_FINSH_PARSE_OPTS）
+                ├─ 有子命令（_FINSH_PARSE_SUBCMDS 非空） → 子命令池
                 ├─ 无子命令但有选项（如 node）   → 选项池，word 补 "--" 前缀
                 └─ pool 仍为空
                      ├─ _ble_registered=1 → 静默退出
