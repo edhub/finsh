@@ -1,143 +1,146 @@
-# 两段式补全与历史自动建议
+# Two-Phase Completion and History Autosuggestion
 
-> 返回 [DESIGN.md](../DESIGN.md)
+> Back to [DESIGN.md](../DESIGN.md)
+
+> 中文文档：[loop-suggestion.zh.md](loop-suggestion.zh.md)
 
 ---
 
-## 两段式补全
+## Two-Phase Completion
 
-补全状态由四个全局变量维持，跨 widget 调用保持：
+Completion state is maintained across widget calls by four global variables:
 
 ```zsh
-typeset -ga _FINSH_CANDS   # 候选列表
-typeset -gi _FINSH_IDX=0   # 当前索引（1-based）
-typeset -g  _FINSH_PFX=""  # 候选前缀（LBUFFER 的不变部分）
-typeset -g  _FINSH_WORD="" # 用户输入的原始词（fzf popup query 用）
+typeset -ga _FINSH_CANDS   # candidate list
+typeset -gi _FINSH_IDX=0   # current index (1-based)
+typeset -g  _FINSH_PFX=""  # candidate prefix (the invariant part of LBUFFER)
+typeset -g  _FINSH_WORD="" # the original typed word (used as fzf popup query)
 ```
 
-### 第 1 次 Tab — 内联填入
+### 1st Tab — Inline Fill
 
-`_finsh_complete` 收集候选、过滤，将第一候选写入 `LBUFFER`，
-用 `zle -M` 在提示符下方展示候选列表（`[当前项]` 加方括号标记）：
+`_finsh_complete` collects and filters candidates, writes the first candidate into `LBUFFER`,
+and uses `zle -M` to display the candidate list below the prompt (`[current]` marked with brackets):
 
 ```
 [list]  link  linkage  livecheck
 ```
 
-同时保存 `_FINSH_WORD`（用户输入的原始词，如 `li`），供第 2 次 Tab 作为 fzf 初始 query。
+`_FINSH_WORD` (the original typed word, e.g. `li`) is saved for use as the fzf initial query on the 2nd Tab.
 
-### 第 2 次 Tab — fzf Popup
+### 2nd Tab — fzf Popup
 
-第 2 次 Tab 触发条件（三个都要满足）：
+The 2nd Tab is triggered only when all three conditions hold:
 
 ```zsh
-[[ "$LASTWIDGET" == "_finsh_complete" ]]                        # 上一个 widget 是本 widget
-&& (( $#_FINSH_CANDS ))                                             # 有候选
-&& [[ "$LBUFFER" == "${_FINSH_PFX}${_FINSH_CANDS[$_FINSH_IDX]}" ]]     # buffer 与上次填入一致
+[[ "$LASTWIDGET" == "_finsh_complete" ]]                              # previous widget was this widget
+&& (( $#_FINSH_CANDS ))                                               # candidates exist
+&& [[ "$LBUFFER" == "${_FINSH_PFX}${_FINSH_CANDS[$_FINSH_IDX]}" ]]  # buffer matches last fill
 ```
 
-第三个条件是关键——防止旧 `_FINSH_CANDS` 脏状态被误用（用户可能手动修改了 buffer）。
+The third condition is critical — it prevents stale `_FINSH_CANDS` from being reused after the user manually edits the buffer (Bug 9).
 
-触发后：
+When triggered:
 
-1. 快照 `_FINSH_PFX` / `_FINSH_CANDS` / `_FINSH_WORD` 到局部变量
-2. 立即清零全局状态、清除 `zle -M` 消息，避免 fzf 返回后状态污染
-3. 启动 fzf（`--height=~10` 内联模式，`--query="$typed"` 预填原始输入词）
-4. 用户选择后将 `${pfx}${selected}` 写入 `LBUFFER`；取消则 buffer 不变
+1. Snapshot `_FINSH_PFX` / `_FINSH_CANDS` / `_FINSH_WORD` to local variables
+2. Immediately zero out global state and clear the `zle -M` message to avoid state pollution after fzf returns
+3. Launch fzf (`--height=~10` inline mode, `--query="$typed"` pre-filled with original typed word)
+4. On selection, write `${pfx}${selected}` to `LBUFFER`; on cancel, buffer is unchanged
 
 ```zsh
-# fzf 调用核心
+# Core fzf invocation
 selected=$(printf '%s\n' "${cands[@]}" | fzf \
     --height=~10 \
     --layout=reverse \
-    --no-sort \              # 保留 _finsh_filter 的优先级排序
-    --query="$typed" \       # 预填用户原始输入，可继续过滤
-    --color='...' \          # ayu_light 配色
+    --no-sort \              # preserve _finsh_filter's priority ordering
+    --query="$typed" \       # pre-fill with user's original input for further filtering
+    --color='...' \          # ayu_light color scheme
     2>/dev/null)
 ```
 
-`--no-sort` 保留 `_finsh_filter` 按 Pass 1→2c 排好的优先级顺序，
-不让 fzf 自己重排（fzf 默认按匹配分重排）。
+`--no-sort` preserves the Pass 1→2c priority order from `_finsh_filter`
+and prevents fzf from re-ranking by its own match score.
 
-### 状态清理
+### State Cleanup
 
-| 时机 | 操作 |
-|------|------|
-| 新一轮补全开始（widget 顶部）| 显式清零 `_FINSH_CANDS / _FINSH_IDX / _FINSH_PFX / _FINSH_WORD` |
-| fzf popup 触发前 | 同上（快照后立即清零） |
-| 其他键触发 `zle-line-pre-redraw` | 检测到 `$LASTWIDGET ≠ _finsh_complete` 时清零并调 `zle -M ""` |
+| Timing | Action |
+|--------|--------|
+| New completion round starts (widget top) | Explicitly zero `_FINSH_CANDS / _FINSH_IDX / _FINSH_PFX / _FINSH_WORD` |
+| Before fzf popup is launched | Same (after snapshotting, immediately zero) |
+| Another key triggers `zle-line-pre-redraw` | When `$LASTWIDGET ≠ _finsh_complete`, zero state and call `zle -M ""` |
 
-> ⚠️ **修改注意**
-> - 第 2 次 Tab 的触发条件三个都要满足，缺少 buffer 验证会导致脏状态被误用（Bug 9）
-> - `_FINSH_WORD` 保存的是 opts-only 工具场景下**已经加了 `--` 前缀的 word**（如用户输入 `bu`，`_FINSH_WORD` 为 `--bu`），这样 fzf query 能直接匹配 `--build` 候选，是正确行为
-> - `zle -M` 不支持 ANSI 转义码（ESC 会被显示为 `^[`），候选列表只能用纯文本 + `[方括号]` 标记
+> ⚠️ **Modification notes**
+> - All three conditions for the 2nd Tab trigger must be satisfied; omitting the buffer check leads to stale state being reused (Bug 9)
+> - `_FINSH_WORD` stores the word **after the `--` prefix has been prepended** for opts-only tools (e.g. user typed `bu`, `_FINSH_WORD` is `--bu`). This way the fzf query directly matches `--build` candidates — this is intentional
+> - `zle -M` does not support ANSI escape codes (ESC is displayed as `^[`); the candidate list can only use plain text + `[brackets]` markers
 
 ---
 
-## 历史自动建议
+## History Autosuggestion
 
-类似 zsh-autosuggestions 的行为：输入时在光标后以灰色显示历史匹配项的剩余部分，按右方向键接受。
+Similar to zsh-autosuggestions: shows the remainder of a matching history entry in gray after the cursor as the user types; right arrow accepts it.
 
-### 工作流程
+### Workflow
 
 ```
-用户输入 "git co"
+User types "git co"
      │
-     └─ zle-line-pre-redraw 触发 _finsh_update_suggestion
+     └─ zle-line-pre-redraw fires _finsh_update_suggestion
           │
-          ├─ 在 $history 中从最近事件号向前搜索第一条以 "git co" 开头的记录
-          │   → 找到 "git commit -m fix" → 建议后缀 " mmit -m fix"
+          ├─ Search $history from the most recent event number backward
+          │  for the first entry starting with "git co"
+          │  → finds "git commit -m fix" → suggestion suffix " mmit -m fix"
           │
           ├─ POSTDISPLAY=" mmit -m fix"
-          └─ region_highlight+=( "N M fg=8 memo=finsh-sug" )  → 灰色显示
+          └─ region_highlight+=( "N M fg=8 memo=finsh-sug" )  → displayed in gray
 ```
 
-### 关键变量
+### Key Variables
 
-| 变量 | 类型 | 作用 |
-|------|------|------|
-| `POSTDISPLAY` | ZLE 内置 scalar | 光标后显示但不进入 buffer 的文本 |
-| `region_highlight` | ZLE 内置 array | 指定任意区间的高亮样式 |
-| `_FINSH_SUGGESTION` | global scalar | 当前建议后缀（缓存） |
-| `_FINSH_SUGGESTION_NEEDLE` | global scalar | 上次搜索的 LBUFFER（避免重复排序/搜索） |
+| Variable | Type | Purpose |
+|----------|------|---------|
+| `POSTDISPLAY` | ZLE built-in scalar | Text shown after cursor that does not enter the buffer |
+| `region_highlight` | ZLE built-in array | Specifies highlight style for arbitrary ranges |
+| `_FINSH_SUGGESTION` | global scalar | Current suggestion suffix (cached) |
+| `_FINSH_SUGGESTION_NEEDLE` | global scalar | `LBUFFER` from last search (avoids repeated sort/search) |
 
-### 高亮机制
+### Highlight Mechanism
 
-`region_highlight` 条目格式：`"start end style memo=token"`，start/end 以 `${#BUFFER}` 为基准。
-POSTDISPLAY 的起点恰好是 `${#BUFFER}`，所以：
+`region_highlight` entry format: `"start end style memo=token"`, with start/end based on `${#BUFFER}`.
+Since POSTDISPLAY starts exactly at `${#BUFFER}`:
 
 ```zsh
 local p=${#BUFFER}
 region_highlight+=( "${p} $((p + ${#_FINSH_SUGGESTION})) fg=8 memo=finsh-sug" )
 ```
 
-`memo=finsh-sug` 是本插件的标识符，清除时精确匹配，不影响其他插件：
+`memo=finsh-sug` is this plugin's identifier; clearing is done by exact match, leaving other plugins unaffected:
 
 ```zsh
 region_highlight=( ${region_highlight:#*memo=finsh-sug} )
 ```
 
-### 与补全共存
+### Coexistence with Completion
 
-`_finsh_pre_redraw` 在 `LASTWIDGET == "_finsh_complete"` 时直接清空 `POSTDISPLAY` 并 return，补全候选列表与灰色建议不会同时出现。
+`_finsh_pre_redraw` immediately clears `POSTDISPLAY` and returns when `LASTWIDGET == "_finsh_complete"`, so the candidate list and the gray suggestion never appear simultaneously.
 
-### 右方向键
+### Right Arrow Key
 
 ```zsh
 _finsh_autosuggest_accept() {
     if [[ -n "$POSTDISPLAY" ]]; then
-        LBUFFER="${LBUFFER}${POSTDISPLAY}"   # 将建议并入 buffer
+        LBUFFER="${LBUFFER}${POSTDISPLAY}"   # merge suggestion into buffer
         POSTDISPLAY=""
         ...
     else
-        zle forward-char   # 无建议时退化为原生行为
+        zle forward-char   # fall back to native behavior when no suggestion
     fi
 }
 ```
 
-绑定 `^[[C`（大多数终端）和 `^[OC`（部分终端）两个右方向键转义序列。
+Binds both `^[[C` (most terminals) and `^[OC` (some terminals) for the right arrow escape sequences.
 
-> ⚠️ **修改注意**
-> - **`zle-line-finish` 时序太晚**：ZLE 完成最终渲染后才触发，此时清空 `POSTDISPLAY` 无效，灰色文字已随行输出打印；必须包装 `accept-line`
-> - **`_FINSH_SUGGESTION_NEEDLE` 不能重置为 `""`**：重置后 `pre-redraw` 会判定 `LBUFFER != needle`，重新搜历史把建议写回 `POSTDISPLAY`；正确做法是清空后把 needle 设为 `"$LBUFFER"`，让 `_finsh_update_suggestion` 命中缓存复用 `_FINSH_SUGGESTION=""`
-> - `${(Onk)history}` 不加外层引号，`k` 作为展开 flag，word-splitting 自动切分为独立数字元素；`"${(@On)${(k)history}}"` 错误——`${(k)history}` 展开为标量，外层 `@` 把整个字符串当单个元素
+> ⚠️ **Modification notes**
+> - **`zle-line-finish` fires too late**: ZLE has already completed final rendering and printed to the terminal; clearing `POSTDISPLAY` there has no effect. Must wrap `accept-line` instead
+> - **Do not reset `_FINSH_SUGGESTION_NEEDLE` to `""`**: after resetting, `pre-redraw` sees `LBUFFER != needle`, re-searches history, and writes the suggestion back to `POSTDISPLAY`, undoing the clear. The correct approach: after clearing, set the needle to `"$LBUFFER"` so `_finsh_update_suggestion` hits the cache and reuses `_FINSH_SUGGESTION=""`
+> - `${(Onk)history}` without outer quotes: `k` acts as an expansion flag; word-splitting correctly splits it into individual numeric elements. `"${(@On)${(k)history}}"` is wrong — `${(k)history}` expands to a scalar, and the outer `@` treats the entire string as a single element

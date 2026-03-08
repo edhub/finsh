@@ -1,51 +1,53 @@
-# 匹配优先级与路径补全
+# Match Priority and Path Completion
 
-> 返回 [DESIGN.md](../DESIGN.md)
+> Back to [DESIGN.md](../DESIGN.md)
 
----
-
-## 匹配优先级（`_finsh_filter`）
-
-逐级降级，命中即停止。**所有 pass 在运行前都会先按首字母预过滤**（候选首字母必须与 word[1] 相同），避免纯 subsequence 在大型候选池中命中大量不相关条目。
-
-| Pass | 名称 | 示例 |
-|------|------|------|
-| pre | 首字母预过滤 | `pi…` 只在 `p` 开头的候选里跑 |
-| 1 | 精确前缀 | `pi` → `pi-claude` |
-| 2a | substring | `pi-cl` → `pi-claude` |
-| 2b | head-anchored subsequence | `piclaud` → `pi-claude`（首字母 `p` 锚定，其余 `iclaud ⊆ i-claude`）|
-| 2c | pure subsequence | `pclaud` → `pi-claude`（`*p*c*l*a*u*d*`，首字母已由 pre 保证）|
-
-所有 pass 用 `${(b)word}` 转义 glob 元字符后再匹配，防止 `--release` 等含特殊字符的词出问题。
-
-> ⚠️ **修改注意**
-> - 结果写入全局 `_FINSH_FILTERED`（不开 subshell），glob 匹配中用 `${(b)word}` 转义元字符，任何修改都要保持一致
-> - word 为空时 `_FINSH_FILTERED` 置空，调用方直接用原始 pool
-> - **首字母预过滤不得移除**：`pool=( ${(M)pool:#${(b)word[1]}*} )`，否则 Pass 2c 的纯 subsequence 会在大型候选池中命中大量无关条目（Pass 2a 的跨首字母 substring 匹配也随之消失，属预期行为——输入 `claude` 应补全以 `c` 开头的东西）
+> 中文文档：[matching.zh.md](matching.zh.md)
 
 ---
 
-## 路径补全
+## Match Priority (`_finsh_filter`)
+
+Passes degrade in order; the first hit wins. **All passes first pre-filter by first letter** (the candidate's first character must match `word[1]`), preventing pure subsequence matching from hitting large numbers of unrelated entries in big candidate pools.
+
+| Pass | Name | Example |
+|------|------|---------|
+| pre | First-letter pre-filter | `pi…` only runs against candidates starting with `p` |
+| 1 | Exact prefix | `pi` → `pi-claude` |
+| 2a | Substring | `pi-cl` → `pi-claude` |
+| 2b | Head-anchored subsequence | `piclaud` → `pi-claude` (first letter `p` anchored, rest `iclaud ⊆ i-claude`) |
+| 2c | Pure subsequence | `pclaud` → `pi-claude` (`*p*c*l*a*u*d*`, first letter guaranteed by pre-filter) |
+
+All passes escape glob metacharacters with `${(b)word}` before matching, preventing issues with inputs like `--release` that contain special characters.
+
+> ⚠️ **Modification notes**
+> - Results are written to the global `_FINSH_FILTERED` (no subshell); glob matching uses `${(b)word}` for escaping — any changes must stay consistent
+> - When `word` is empty, `_FINSH_FILTERED` is left empty and the caller uses the raw pool directly
+> - **The first-letter pre-filter must not be removed**: `pool=( ${(M)pool:#${(b)word[1]}*} )`. Without it, Pass 2c pure subsequence matches vast numbers of unrelated entries in large pools (cross-first-letter substring matching in Pass 2a also disappears — this is intentional: typing `claude` should complete things starting with `c`)
+
+---
+
+## Path Completion
 
 ```zsh
 # word = "~/dev/fzf-b"
 dir  = word:h  = "~"          # dirname
-base = word:t  = "fzf-b"      # basename，用于过滤
-xdir = dir 展开 ~ → "$HOME"
-sep  = "~/"                    # 还原到输出时保留原始 ~/
-xbase = xdir 去尾斜杠
+base = word:t  = "fzf-b"      # basename, used for filtering
+xdir = dir with ~ expanded → "$HOME"
+sep  = "~/"                    # preserved in output to keep original ~/
+xbase = xdir with trailing slash stripped
 
-# glob（含 dotfile，用 D qualifier）
+# glob (includes dotfiles via D qualifier)
 names=( "${xbase}"/*(.DN) "${xbase}"/*(/DN) )
-names=( "${names[@]#${xbase}/}" )   # 剥离路径前缀，只保留 basename
+names=( "${names[@]#${xbase}/}" )   # strip path prefix, keep basename only
 
-# 根目录特殊处理（xbase="" 时避免 //Applications）
+# Special case for root directory (avoid //Applications when xbase="")
 if [[ -z "$xbase" ]]; then
     names=( /*(.DN) /*(/DN) )
 fi
 ```
 
-> ⚠️ **修改注意**
-> - `~` 在双引号内不展开，必须用 `${dir/#\~/$HOME}` 手动替换前缀
-> - glob `*` 默认不匹配 dotfile（`.zshrc` 等），需加 `D` qualifier：`*(.DN)` / `*(/DN)`
-> - 根目录时 `xbase=""` 若不特判会产生 `//Applications` 双斜杠路径
+> ⚠️ **Modification notes**
+> - `~` does not expand inside double quotes; use `${dir/#\~/$HOME}` to manually replace the prefix
+> - Glob `*` does not match dotfiles (`.zshrc` etc.) by default; add the `D` qualifier: `*(.DN)` / `*(/DN)`
+> - When at root, `xbase=""` without special-casing produces double-slash paths like `//Applications`

@@ -1,39 +1,41 @@
 # finsh
 
-> 读作 **"finish"** — `fin`（鱼鳍，致敬 Fish shell）+ `sh`（shell），中间的 `i` 故意省略
+> Pronounced **"finish"** — `fin` (fish fin, a nod to Fish shell) + `sh` (shell), with the `i` intentionally dropped.
 
-Fish shell 带来了一种「所见即所得」的补全体验——候选始终可见，模糊匹配让任意片段都能命中目标。
-用过之后再回到 zsh 的 Tab，总觉得少了什么。
+Fish shell introduced a "what-you-see-is-what-you-get" completion experience — candidates are always visible, and fuzzy matching lets any substring hit the target.
+Once you've used it, going back to zsh's plain Tab feels like something's missing.
 
-[ble.sh](https://github.com/akinomyoga/ble.sh) 证明了在 Bash 里复刻这种体验是可能的。
-于是 **finsh** 诞生了——把同样的补全哲学带给 macOS 上的 zsh 用户。
+[ble.sh](https://github.com/akinomyoga/ble.sh) proved that replicating this experience in Bash is possible.
+So **finsh** was born — bringing the same completion philosophy to zsh users on macOS.
 
----
-
-## 核心解决的问题
-
-`fzf-tab` 等方案的候选来自 zsh 原生补全——zsh 已用**精确前缀**过滤了一遍：
-输入 `piclaud` 想匹配 `pi-claude`，zsh 先把不以 `piclaud` 开头的候选全砍掉，
-fzf 拿到的是空列表。
-
-finsh 在 **ZLE 层**自行收集原始候选，完全绕过 zsh 的前缀截断。
+> 中文文档：[README.zh.md](README.zh.md)
 
 ---
 
-## 特性
+## The Core Problem
 
-- **两段式补全**：第一次 Tab 展示候选列表（show 模式）；第二次 Tab 填入并循环切换
-- **实时重过滤**：show 模式下继续输入，候选列表实时更新，无需重新按 Tab
-- **多级 fuzzy 匹配**：前缀 → substring → head-anchored subsequence → pure subsequence
-- **历史自动建议**：灰色显示历史匹配后缀，`→` 一键接受
-- **路径补全**：含 dotfile，层级 glob，支持 `~` 展开
-- **子命令 / 选项补全**：优先用 zsh 注册的补全函数，自动降级到解析 `--help` 输出
+Solutions like `fzf-tab` rely on zsh's native completion — which already filtered candidates with **exact prefix** matching:
+type `piclaud` hoping to match `pi-claude`, and zsh strips everything that doesn't start with `piclaud`,
+leaving fzf with an empty list.
+
+finsh collects raw candidates at the **ZLE layer**, bypassing zsh's prefix truncation entirely.
 
 ---
 
-## 安装
+## Features
 
-### 手动
+- **Two-phase completion**: first Tab shows the candidate list (show mode); second Tab fills in and cycles through
+- **Live re-filtering**: in show mode, keep typing to filter candidates in real time without pressing Tab again
+- **Multi-level fuzzy matching**: prefix → substring → head-anchored subsequence → pure subsequence
+- **History autosuggestion**: shows the matching history suffix in gray; `→` accepts in one keystroke
+- **Path completion**: includes dotfiles, multi-level glob, supports `~` expansion
+- **Subcommand / option completion**: prefers zsh-registered completion functions, falls back to parsing `--help` output
+
+---
+
+## Installation
+
+### Manual
 
 ```zsh
 mkdir -p ~/.zsh/plugins
@@ -41,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/edhub/finsh/main/finsh.zsh \
     -o ~/.zsh/plugins/finsh.zsh
 ```
 
-在 `~/.zshrc` 中添加：
+Add to `~/.zshrc`:
 
 ```zsh
 source ~/.zsh/plugins/finsh.zsh
@@ -60,7 +62,7 @@ git clone https://github.com/edhub/finsh \
     ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/finsh
 ```
 
-在 `~/.zshrc` 的 `plugins` 列表中添加 `finsh`：
+Add `finsh` to the `plugins` list in `~/.zshrc`:
 
 ```zsh
 plugins=(... finsh)
@@ -68,48 +70,48 @@ plugins=(... finsh)
 
 ---
 
-脚本会自动完成初始化：在 macOS 上自动将 Homebrew 补全目录加入 `fpath`，并在需要时运行 `compinit`。
+The plugin initializes itself automatically: on macOS it adds the Homebrew completion directory to `fpath` and runs `compinit` if needed.
 
-> **诊断**：子命令补全不工作时执行 `print $_comps[git]`。
-> 若为空说明 Homebrew 未安装或补全文件缺失（`brew install zsh-completions`）。
-
----
-
-## 按键
-
-| 按键 | 行为 |
-|------|------|
-| `Tab`（第 1 次）| fuzzy 过滤 → 底部展示候选列表（show 模式） |
-| 继续输入 | 实时重过滤候选列表 |
-| `Tab`（第 2 次）| 填入第一候选，进入 cycle 模式 |
-| `Tab`（cycle 中）| 循环切换到下一候选 |
-| `Shift+Tab` | 原生 zsh 补全（保留上下文感知行为）|
-| `→` / `Ctrl+F` | 接受历史自动建议；无建议时退化为 forward-char |
-| 任意其他键 | 接受当前候选，列表消失 |
+> **Diagnostics**: if subcommand completion isn't working, run `print $_comps[git]`.
+> An empty result means Homebrew isn't installed or completion files are missing (`brew install zsh-completions`).
 
 ---
 
-## Tab 补全行为
+## Key Bindings
 
-### 第 1 次 Tab — Show 模式
+| Key | Behavior |
+|-----|----------|
+| `Tab` (1st press) | Fuzzy filter → show candidate list at the bottom (show mode) |
+| Continue typing | Re-filter candidates in real time |
+| `Tab` (2nd press) | Fill in first candidate, enter cycle mode |
+| `Tab` (in cycle mode) | Cycle to the next candidate |
+| `Shift+Tab` | Native zsh completion (preserves context-aware behavior) |
+| `→` / `Ctrl+F` | Accept history autosuggestion; falls back to forward-char if none |
+| Any other key | Accept current candidate, list disappears |
 
-按下 Tab 后立即在底部展示所有候选，命令行内容**不变**，可以继续输入过滤：
+---
+
+## Tab Completion Behavior
+
+### 1st Tab — Show Mode
+
+After pressing Tab, all candidates are shown at the bottom immediately. The command line **stays unchanged** so you can keep typing to filter:
 
 ```
 ❯ brew li
 list  link  linkage  livecheck
 ```
 
-继续输入 `nk`：
+Continue typing `nk`:
 
 ```
 ❯ brew link
 link  linkage
 ```
 
-### 第 2 次 Tab — 填入并循环
+### 2nd Tab — Fill and Cycle
 
-再按 Tab 填入第一候选，进入 cycle 模式，继续按 Tab 循环切换：
+Press Tab again to fill in the first candidate and enter cycle mode; keep pressing Tab to cycle:
 
 ```
 ❯ brew link
@@ -123,36 +125,36 @@ link  [linkage]
 
 ---
 
-## 匹配优先级
+## Match Priority
 
-所有 pass 运行前先按首字母预过滤，逐级降级，命中即停止：
+All passes pre-filter by first letter before running. Passes degrade in order; the first hit wins:
 
-| Pass | 名称 | 示例 |
-|------|------|------|
-| pre | 首字母预过滤 | `pi…` 只在 `p` 开头的候选里跑 |
-| 1 | 精确前缀 | `pi` → `pi-claude` |
-| 2a | substring | `pi-cl` → `pi-claude` |
-| 2b | head-anchored subsequence | `piclaud` → `pi-claude` |
-| 2c | pure subsequence | `pclaud` → `pi-claude` |
-
----
-
-## 补全场景
-
-| 场景 | 候选来源 |
-|------|----------|
-| 第一个词（命令名）| `commands` + 可见函数 + aliases + builtins |
-| 含 `/` 的词（路径）| 对应目录层 glob（含 dotfile），仅取 basename 过滤 |
-| 有注册补全函数的子命令/选项 | `zle -C` + `compadd` hook 截获 zsh 原生补全 |
-| 无注册补全函数的子命令/选项 | 解析 `$cmd [subcmd…] --help` 输出 |
-| 以上均无结果 | 无注册补全函数时回退 `zle complete-word`；有注册函数时静默退出 |
+| Pass | Name | Example |
+|------|------|---------|
+| pre | First-letter pre-filter | `pi…` only runs against candidates starting with `p` |
+| 1 | Exact prefix | `pi` → `pi-claude` |
+| 2a | Substring | `pi-cl` → `pi-claude` |
+| 2b | Head-anchored subsequence | `piclaud` → `pi-claude` |
+| 2c | Pure subsequence | `pclaud` → `pi-claude` |
 
 ---
 
-## 文件
+## Completion Scenarios
 
-| 文件 | 说明 |
-|------|------|
-| `finsh.zsh` | 唯一实现文件 |
-| `DESIGN.md` | 设计文档（架构、实现细节、Bug 历史）|
-| `tests/test-help-parser.zsh` | `_finsh_parse_help` 与 `_finsh_filter` 单元测试 |
+| Scenario | Candidate source |
+|----------|-----------------|
+| First word (command name) | `commands` + visible functions + aliases + builtins |
+| Word containing `/` (path) | Directory glob for the matching level (includes dotfiles), filtered by basename |
+| Subcommand/option with registered completion | `zle -C` + `compadd` hook intercepts zsh native completion |
+| Subcommand/option without registered completion | Parses `$cmd [subcmd…] --help` output |
+| None of the above yield results | Falls back to `zle complete-word` (no registered function); silently exits (registered function exists) |
+
+---
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `finsh.zsh` | Single implementation file |
+| `DESIGN.md` | Design document (architecture, implementation details, bug history) |
+| `tests/test-help-parser.zsh` | Unit tests for `_finsh_parse_help` and `_finsh_filter` |
