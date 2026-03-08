@@ -45,10 +45,12 @@ typeset -ga _FINSH_POOL
 # 补全状态（跨 widget 调用保持）
 # 第 1 次 Tab：show 模式——展示列表不填入；继续输入→实时过滤；
 # 再次 Tab→填入第一候选（cycle 模式）
-typeset -ga _FINSH_CANDS   # 当前补全的候选列表
+typeset -ga _FINSH_CANDS   # 当前补全的候选列表（已截断到 _FINSH_MAX_CANDS）
 typeset -gi _FINSH_IDX=0   # 当前选中索引（1-based；show 模式下为 0）
 typeset -g  _FINSH_PFX=""  # 候选词之前的内容（LBUFFER 前缀，show 模式期间固定不变）
 typeset -g  _FINSH_WORD="" # 发起补全时用户输入的原始词
+typeset -gi _FINSH_MAX_CANDS=20  # 最大展示 / tab 循环候选数（0 = 不限制）
+typeset -gi _FINSH_TOTAL=0       # 截断前的候选总数（用于显示 "+N more" 提示）
 
 # show 模式状态（首次 Tab 进入，再次 Tab 退出并填入）
 typeset -gi _FINSH_SHOW_MODE=0      # 1=show-without-fill 模式
@@ -103,11 +105,18 @@ typeset -g  _FINSH_WORD_TMP=""   # 可能被修改的 word（opts-only 工具补
 #   已验证工具：
 #     section-based: zig(2sp)  cargo(4sp,comma)  npm(comma)
 #                    docker(multi-section)  hx(FLAGS:/USAGE:)
+#                    pi/cobra（每行带程序名前缀："  pi install <args>"）
 #     flat:          git(3sp, 无 section header)
+#
+#   cobra/urfave 风格（$2 传入命令 basename）：
+#     Commands 区块每行格式为 "  <progname> <subcmd> [args...]"
+#     当首词等于 $_cmdname 时，取第二个词作为子命令；
+#     跳过 "<placeholder>" 格式（如 "pi <command> --help"）
 _finsh_parse_help() {
     emulate -L zsh
     setopt extendedglob
     local _help_out="$1"
+    local _cmdname="${2:t}"  # 命令 basename，用于识别 cobra 风格的 "  pi subcmd" 格式
     _FINSH_PARSE_SUBCMDS=()
     _FINSH_PARSE_OPTS=()
     [[ -z "$_help_out" ]] && return
@@ -146,6 +155,11 @@ _finsh_parse_help() {
                     _part="${_part%%[[:space:]]*}"
                     [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
                 done
+            # cobra 风格：首词是程序名，消费整行；若第二词是合法子命令则提取，
+            # 否则（"<placeholder>" 格式，如 "pi <command> --help"）静默跳过
+            elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{1,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
+                [[ "$_line" =~ '^[[:space:]]{1,8}'"${(b)_cmdname}"'[[:space:]]+([a-z][-a-z0-9]*)' ]] && \
+                    _FINSH_PARSE_SUBCMDS+=("$match[1]")
             # 普通行：1-8 空格缩进 + 小写首词（section 已限定范围，规则简单）
             elif [[ "$_line" =~ '^[[:space:]]{1,8}([a-z][-a-z0-9]*)' ]]; then
                 _FINSH_PARSE_SUBCMDS+=("$match[1]")
@@ -175,6 +189,10 @@ _finsh_parse_help() {
                     _part="${_part%%[[:space:]]*}"
                     [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
                 done
+            # cobra 风格：首词是程序名，消费整行；若第二词是合法子命令（后接 2+ 空格）则提取
+            elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
+                [[ "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]+([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]] && \
+                    _FINSH_PARSE_SUBCMDS+=("$match[1]")
             # 普通行：2-8 空格缩进 + 名称后 2+ 空格间距
             # 2+ 空格间距用于排除 "  cmd [ARG]..." 类 USAGE 行（名称后只有 1 空格）
             elif [[ "$_line" =~ '^[[:space:]]{2,8}([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]]; then
@@ -184,6 +202,83 @@ _finsh_parse_help() {
 
         esac
     done <<< "$_help_out"
+}
+
+# ── Man page 解析 ────────────────────────────────────────────────────────────
+# 针对无 --help 或 --help 无结果时的兜底；被 _finsh_collect_subcmd_pool 调用。
+# 输出写入全局 _FINSH_PARSE_SUBCMDS / _FINSH_PARSE_OPTS（与 _finsh_parse_help 共用变量）。
+#
+# 与 --help 解析的核心差异：
+#   section header：无冒号全大写（COMMANDS、OPTIONS、CLIENTS AND SESSIONS 等）
+#   子命令提取：name 后接 " [" 或行尾，过滤 "target-session is tried as..." 类描述行
+#   选项提取：双横杠 --flag（有 OPTIONS section 时）＋ 单横杠 -x（任意 section 均检测）
+#
+# BSD/macOS 工具（ssh、cp、find 等）无独立 OPTIONS section，选项嵌在 DESCRIPTION 内：
+#   格式：5 空格缩进 + -x + 1+ 空格 + 描述（如 "     -4      Forces ssh to use IPv4"）
+#   在 other state 检测此模式即可收集，无需专门 section。
+#
+# 已验证工具：
+#   有 OPTIONS section: grep(GNU)、less
+#   无 OPTIONS section: ssh(-4,-6,-A...)  cp(-H,-L,-P,-R...)
+#   有 COMMANDS section: (需工具有明确 COMMANDS 节，如部分自定义 CLI)
+#   不适用 (命令散布于子 section): tmux — 建议改用 tmux list-commands
+_finsh_parse_man() {
+    emulate -L zsh
+    setopt extendedglob
+    local _man_out="$1"
+    _FINSH_PARSE_SUBCMDS=()
+    _FINSH_PARSE_OPTS=()
+    [[ -z "$_man_out" ]] && return
+
+    local _section="other"
+    local _line _lc
+
+    while IFS= read -r _line; do
+
+        # ── Section header：无冒号全大写，行长 ≤ 40 ──────────────────────────
+        # 例：COMMANDS、OPTIONS、CLIENTS AND SESSIONS（长度 20 ≤ 40，但不含 commands）
+        if [[ "$_line" =~ '^[A-Z][A-Z0-9 -]*$' ]] && (( ${#_line} <= 40 )); then
+            _lc="${_line:l}"
+            if   [[ "$_lc" =~ '(sub)?commands?' ]]; then _section="subcmds"
+            elif [[ "$_lc" =~ '(options?|flags?)' ]]; then _section="opts"
+            else _section="other"
+            fi
+            continue
+        fi
+
+        case "$_section" in
+
+        subcmds)
+            # 3-12 空格缩进 + 小写连字符名 + " [" 或行尾
+            # " [" 要求：过滤 "     target-session is tried as, in order:" 类描述行
+            # 实践：tmux man page 里真实命令条目形如 "     attach-session [-dErx] ..."
+            if [[ "$_line" =~ '^[[:space:]]{3,12}([a-z][-a-z0-9]*)( \[|$)' ]]; then
+                _FINSH_PARSE_SUBCMDS+=("$match[1]")
+            fi
+            ;;
+
+        opts)
+            # 长选项（带或不带 -x, 短选项前缀）
+            if [[ "$_line" =~ '^[[:space:]]+((-[a-zA-Z0-9]+,?[[:space:]]+)?)(--([a-zA-Z][a-zA-Z0-9-]*))' ]]; then
+                _FINSH_PARSE_OPTS+=("--$match[4]")
+            # 单横杠短选项（1-2 字符，后接 1+ 空格）
+            elif [[ "$_line" =~ '^[[:space:]]{3,12}(-[a-zA-Z0-9][a-zA-Z0-9]?)[[:space:]]+' ]]; then
+                _FINSH_PARSE_OPTS+=("$match[1]")
+            fi
+            ;;
+
+        other)
+            # BSD 工具选项嵌在 DESCRIPTION 内（ssh、cp 等无独立 OPTIONS section）
+            # 模式：3-12 空格缩进 + -x 或 -xy（1-2 字符） + 1+ 空格
+            # 例：ssh "     -4      Forces..."  cp "     -H    If the -R option..."
+            # 注意：-b bind_address（1 空格）也被捕获（选项+参数名格式）
+            if [[ "$_line" =~ '^[[:space:]]{3,12}(-[a-zA-Z0-9][a-zA-Z0-9]?)[[:space:]]+' ]]; then
+                _FINSH_PARSE_OPTS+=("$match[1]")
+            fi
+            ;;
+
+        esac
+    done <<< "$_man_out"
 }
 
 # ── 多级过滤函数 ──────────────────────────────────────────────────────────────
@@ -262,6 +357,16 @@ _finsh_show_candidates() {
     done
     [[ -n "$line" ]] && out+=("$line")
 
+    # 若候选被截断，在末尾追加提示
+    if (( _FINSH_TOTAL > $#_FINSH_CANDS )); then
+        local _more="(+$(( _FINSH_TOTAL - $#_FINSH_CANDS )) more)"
+        if (( $#out )); then
+            out[-1]+="  $_more"
+        else
+            out=("$_more")
+        fi
+    fi
+
     zle -M -- "${(j:\n:)out}"
 }
 
@@ -334,8 +439,8 @@ _finsh_try_path() {
         dir="${_word:h}"
         base="${_word:t}"
     fi
-    # base 不足 2 个字符时不触发（含 trailing-slash 的 base="" 情况）
-    (( ${#base} >= 2 )) || return 0
+    # base 不足 1 个字符时不触发（含 trailing-slash 的 base="" 情况）
+    (( ${#base} >= 1 )) || return 0
 
     local xdir="${dir/#\~/$HOME}"   # 展开 ~ （双引号内 ~ 不展开，替换前缀）
     local sep="${dir%/}/"           # 规范化分隔符：去掉末尾 / 再加回，避免 dir="/" 时双斜杠
@@ -365,6 +470,8 @@ _finsh_try_path() {
         return 0
     fi
 
+    _FINSH_TOTAL=$#show
+    (( _FINSH_MAX_CANDS > 0 && $#show > _FINSH_MAX_CANDS )) && show=( "${(@)show[1,$_FINSH_MAX_CANDS]}" )
     _FINSH_CANDS=( "${show[@]}" )
     _FINSH_PFX="${_prefix}${sep}"
     _FINSH_WORD="$base"
@@ -442,7 +549,7 @@ _finsh_collect_subcmd_pool() {
         fi
 
         if [[ -n "$_help_out" ]]; then
-            _finsh_parse_help "$_help_out"
+            _finsh_parse_help "$_help_out" "${_help_words[1]}"
             if [[ "$_word" == -* ]]; then
                 _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
             elif (( $#_FINSH_PARSE_SUBCMDS )); then
@@ -452,6 +559,32 @@ _finsh_collect_subcmd_pool() {
                 # 把 opts 纳入 pool；word 非空时补 -- 前缀，使 "bu" 能匹配 "--build-sea"
                 _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
                 [[ -n "$_word" ]] && _FINSH_WORD_TMP="--${_word}"
+            fi
+        fi
+    fi
+
+    # ── --help 无结果：尝试解析 man page ─────────────────────────────────────
+    # 适用场景：无 --help 的 BSD/POSIX 工具（ssh、cp、find 等）
+    #           或 --help 只输出 usage 行无可解析内容
+    # man page 选项通常是 -x 单横杠；用户需明确输入 - 才路由到选项池（不做 "--" 前缀技巧）
+    # 注意：tmux 命令分散在子 section（CLIENTS AND SESSIONS 等）而非 COMMANDS section，
+    #       man page 解析对 tmux 效果有限；tmux 建议改用 tmux list-commands
+    if [[ -n "$_cmd" ]] && (( $#_FINSH_POOL_TMP == 0 )); then
+        local _man_cache_key="man:${_cmd}"
+        local _man_out
+        if [[ -n "${_FINSH_HELP_CACHE[$_man_cache_key]+x}" ]]; then
+            _man_out="${_FINSH_HELP_CACHE[$_man_cache_key]}"
+        else
+            _man_out="$(man -P cat "$_cmd" 2>/dev/null | col -bx)"
+            _FINSH_HELP_CACHE[$_man_cache_key]="$_man_out"
+        fi
+        if [[ -n "$_man_out" ]]; then
+            _finsh_parse_man "$_man_out"
+            if [[ "$_word" == -* ]]; then
+                _FINSH_POOL_TMP=( "${_FINSH_PARSE_OPTS[@]}" )
+            elif (( $#_FINSH_PARSE_SUBCMDS )); then
+                _FINSH_POOL_TMP=( "${_FINSH_PARSE_SUBCMDS[@]}" )
+            # man page 的选项是 -x 单横杠，不做 "--" 前缀路由（要补全选项需显式输入 -）
             fi
         fi
     fi
@@ -513,8 +646,8 @@ _finsh_complete() {
         return
     fi
 
-    # 命令名 / 子命令 / 选项补全：word 不足 2 个字符时不触发
-    (( ${#word} >= 2 )) || return
+    # 命令名 / 子命令 / 选项补全：word 不足 1 个字符时不触发
+    (( ${#word} >= 1 )) || return
 
     local -a pool=()
     local _registered=0
@@ -571,6 +704,8 @@ _finsh_complete() {
 
     # ── 进入 show 模式：展示候选列表，不填入任何候选 ────────────────────────
     # 用户可继续输入以实时过滤；再次 Tab → 填入第一候选（cycle 模式）
+    _FINSH_TOTAL=$#show
+    (( _FINSH_MAX_CANDS > 0 && $#show > _FINSH_MAX_CANDS )) && show=( "${(@)show[1,$_FINSH_MAX_CANDS]}" )
     _FINSH_CANDS=( "${show[@]}" )
     _FINSH_PFX="$prefix"
     _FINSH_WORD="$word"
@@ -687,8 +822,8 @@ _finsh_pre_redraw() {
             return
         fi
 
-        # 当前词不足 2 个字符：退出 show 模式（触发条件：用户回删）
-        if (( ${#_sm_cur_word} < 2 )); then
+        # 当前词不足 1 个字符：退出 show 模式（触发条件：用户回删）
+        if (( ${#_sm_cur_word} < 1 )); then
             _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
             _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_WORD=""
             zle -M ""
@@ -715,6 +850,8 @@ _finsh_pre_redraw() {
         fi
 
         # 更新候选列表并展示（_FINSH_IDX=0 → 无方括号高亮，show 模式下无选中项）
+        _FINSH_TOTAL=$#_sm_show
+        (( _FINSH_MAX_CANDS > 0 && $#_sm_show > _FINSH_MAX_CANDS )) && _sm_show=( "${(@)_sm_show[1,$_FINSH_MAX_CANDS]}" )
         _FINSH_CANDS=( "${_sm_show[@]}" )
         _FINSH_IDX=0
         _FINSH_WORD="$_sm_cur_word"

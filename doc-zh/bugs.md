@@ -2,7 +2,7 @@
 
 # Bug 历史
 
-> 返回 [DESIGN.zh.md](../DESIGN.zh.md)
+> 返回 [DESIGN.md](DESIGN.md)
 
 ---
 

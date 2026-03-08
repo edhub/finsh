@@ -2,7 +2,7 @@
 
 # 匹配优先级与路径补全
 
-> 返回 [DESIGN.zh.md](../DESIGN.zh.md)
+> 返回 [DESIGN.md](DESIGN.md)
 
 ---
 

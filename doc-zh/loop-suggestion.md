@@ -2,7 +2,7 @@
 
 # 两段式补全与历史自动建议
 
-> 返回 [DESIGN.zh.md](../DESIGN.zh.md)
+> 返回 [DESIGN.md](DESIGN.md)
 
 ---
 

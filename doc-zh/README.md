@@ -1,4 +1,4 @@
-> English documentation: [README.md](README.md)
+> English documentation: [README.md](../README.md)
 
 # finsh
 
@@ -50,6 +50,8 @@ source ~/.zsh/plugins/finsh.zsh
 ```
 
 ### zinit
+
+在 `~/.zshrc` 中添加：
 
 ```zsh
 zinit light edhub/finsh

@@ -43,6 +43,59 @@ The 2+ space gap requirement in `flat` state filters two categories of false pos
 - `    hx [FLAGS]...`: only 1 space after `hx` → no match
 - 35+ space-aligned continuation lines (e.g. hx's `or 'all'...`): indent exceeds 8 → no match
 
+### man page 解析（`_finsh_parse_man`）
+
+`_finsh_parse_man` 是 `--help` 无结果时的最终兜底，专为 BSD/POSIX 工具设计（如 `ssh`、`cp`、`find` 等无 `--help` 选项的工具）。
+
+调用方式：`man -P cat $cmd | col -bx`，结果缓存在 `_FINSH_HELP_CACHE["man:$cmd"]`。
+
+**section header 检测**（与 `--help` 格式的差异）：
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| `--help` style | `Commands:` | 首字母开头 + 冒号 |
+| man page style | `COMMANDS` | 全大写，无冒号，行长 ≤ 40 |
+
+**各状态提取规则**：
+
+| 状态 | 规则 |
+|------|------|
+| `subcmds` | 3-12 空格缩进 + 小写连字符名 + `" ["` 或行尾；`" ["` 要求过滤 `"target-session is tried"` 类散文行 |
+| `opts` | `--flag`（带或不带 `-x,` 前缀）＋ 单横杠 `-x` 或 `-xy`（3-12 空格 + 1+ 空格间距） |
+| `other` | 仅 BSD 内嵌选项模式：3-12 空格 + `-x/-xy` + 1+ 空格；用于 DESCRIPTION 内嵌选项（ssh、cp 等） |
+
+**关键设计：`other` state 的 BSD 选项检测**
+
+BSD/macOS 工具（`ssh`、`cp` 等）无独立 `OPTIONS` section，选项嵌在 `DESCRIPTION` 内：
+```
+     -4      Forces ssh to use IPv4 addresses only.
+     -H    If the -R option is specified, symbolic links are followed.
+     -b bind_address
+```
+`DESCRIPTION` 触发 `other` state；`3-12空格 + -x + 1+空格` 模式在此 state 检测，捕获所有这类选项。
+
+**已知限制**：tmux 的命令分散在 `CLIENTS AND SESSIONS`、`WINDOWS AND PANES` 等子 section，不在 `COMMANDS` section 内，因此 man page 解析对 tmux subcommand 补全无效。tmux 建议使用 `tmux list-commands` 获取完整命令列表。
+
+### `--help` → man page 回退链
+
+```
+_finsh_collect_subcmd_pool 内的完整回退链：
+
+1. zle -C 捕获（_comps[$cmd] 非空时）
+   │  pool 非空 → 使用
+   │  pool 空（_arguments 绕过 hook）↓
+2. $cmd --help 解析（_finsh_parse_help）
+   │  有结果 → 路由到 subcmds/opts 池
+   │  无结果 ↓
+3. man -P cat $cmd | col -bx 解析（_finsh_parse_man）
+   │  有结果 → 路由到 subcmds/opts 池
+   │  无结果 → 按 _registered 决定静默退出或 fallback complete-word
+```
+
+man page 解析在两种情况均尝试（不区分 `_registered`）：
+- 无注册补全函数（`_registered=0`）
+- 有注册函数但 `_arguments` 绕过 hook（`_registered=1`，如 `_ssh`、`_cp`）
+
 ### Routing for opts-only tools (no subcommands, only options)
 
 For tools like `node` or `hx` that have only options and no subcommands, the word should still route to the options pool even when it doesn't start with `-`:
@@ -62,12 +115,12 @@ fi
 
 **Effect**: `node bu<Tab>` → `word` becomes `"--bu"` → prefix-matches `--build-sea`, `--build-snapshot`, etc. `_FINSH_PFX` remains the original `prefix` (`"node "`), and the candidate directly replaces the original word (`"bu"` becomes `"--build-sea"`).
 
-### Fallback strategy when pool is empty
+### pool 为空时的回退策略
 
-| Situation | Behavior |
-|-----------|----------|
-| Registered completion function exists, capture yields nothing, `--help` also yields nothing | **Silently exit** (avoids `_just` producing `=` when no justfile exists) |
-| No registered completion function, help also yields nothing | **Fallback** to `zle complete-word` (typically file completion) |
+| 情况 | 行为 |
+|------|------|
+| 有注册补全函数，capture 无结果，`--help` 无结果，man page 也无结果 | **静默退出** |
+| 无注册补全函数，help 和 man page 都无结果 | **fallback** `zle complete-word` |
 
 > ⚠️ **Modification notes**
 > - `_FINSH_HELP_CACHE` is `typeset -gA`; key = space-joined command words; only one fork per session. After changing help parsing logic, ensure cache key consistency

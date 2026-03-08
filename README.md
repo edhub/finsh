@@ -51,6 +51,8 @@ source ~/.zsh/plugins/finsh.zsh
 
 ### zinit
 
+Add to `~/.zshrc`:
+
 ```zsh
 zinit light edhub/finsh
 ```

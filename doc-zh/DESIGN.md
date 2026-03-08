@@ -1,8 +1,8 @@
-> English documentation: [DESIGN.md](DESIGN.md)
+> English documentation: [DESIGN.md](../DESIGN.md)
 
 # finsh — 设计文档
 
-> 安装与快速上手见 [README.md](README.md)。
+> 安装与快速上手见 [README.md](../README.md)。
 
 ---
 
@@ -47,7 +47,7 @@ Tab 键
 
 | 文档 | 内容 |
 |------|------|
-| [docs/matching.zh.md](docs/matching.zh.md) | 匹配优先级（Pass 1–2c）、首字母预过滤、路径补全实现细节 |
-| [docs/subcommand.zh.md](docs/subcommand.zh.md) | 子命令/选项补全、`--help` 状态机、`compadd` hook 与 `zle -C` |
-| [docs/loop-suggestion.zh.md](docs/loop-suggestion.zh.md) | 两段式补全状态管理（内联填入 + fzf popup）、历史自动建议实现 |
-| [docs/bugs.zh.md](docs/bugs.zh.md) | 历史 Bug 记录（Bug 1–17） |
+| [matching.md](matching.md) | 匹配优先级（Pass 1–2c）、首字母预过滤、路径补全实现细节 |
+| [subcommand.md](subcommand.md) | 子命令/选项补全、`--help` 状态机、`compadd` hook 与 `zle -C` |
+| [loop-suggestion.md](loop-suggestion.md) | 两段式补全状态管理（内联填入 + fzf popup）、历史自动建议实现 |
+| [bugs.md](bugs.md) | 历史 Bug 记录（Bug 1–17） |
