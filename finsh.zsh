@@ -52,7 +52,7 @@ typeset -ga _FINSH_POOL
 typeset -ga _FINSH_CANDS   # current candidate list (truncated to _FINSH_MAX_CANDS)
 typeset -gi _FINSH_IDX=0   # current selection index (1-based; 0 in show mode)
 typeset -g  _FINSH_PFX=""  # content before the candidate word (fixed LBUFFER prefix during show mode)
-typeset -gi _FINSH_MAX_CANDS=20  # max candidates to display / cycle through (0 = unlimited)
+: ${_FINSH_MAX_CANDS:=20}; typeset -gi _FINSH_MAX_CANDS  # max candidates; 0 = unlimited; set before sourcing to override
 typeset -gi _FINSH_TOTAL=0       # total candidates before truncation (used for "+N more" hint)
 
 # Show-mode state (entered on first Tab, exited and filled on second Tab).
@@ -74,11 +74,31 @@ typeset -ga _FINSH_PARSE_OPTS      # parsed --flag list
 # History autosuggestion state.
 typeset -g _FINSH_SUGGESTION=""         # current suggestion suffix (POSTDISPLAY content)
 typeset -g _FINSH_SUGGESTION_NEEDLE=""  # last searched needle (avoids redundant searches)
+typeset -gi _FINSH_HIST_SIZE=0          # history size at last sort (0 triggers initial sort on first search)
+typeset -ga _FINSH_HIST_NUMS=()         # event numbers in descending order; rebuilt only when history grows
 
 # Output variables for _finsh_collect_subcmd_pool (avoids subshell).
 typeset -ga _FINSH_POOL_TMP=()   # collected candidate pool
 typeset -gi _FINSH_REG_TMP=0     # whether a registered completion function exists (0/1)
 typeset -g  _FINSH_WORD_TMP=""   # word possibly modified by the collector (opts-only tools prepend "--")
+
+# ── Comma-list helper ─────────────────────────────────────────────────────────
+# Parse one comma-separated alias line from --help output and append valid
+# subcommand tokens to _FINSH_PARSE_SUBCMDS.
+# "    build, b  Compile the project" → appends "build" and "b"
+# Called from _finsh_parse_help (subcmds + flat states) to avoid duplicating logic.
+_finsh_parse_comma_list() {
+    emulate -L zsh
+    setopt extendedglob
+    local _line="$1" _part
+    local _trimmed="${_line##[[:space:]]#}"
+    local _aliases_part="${_trimmed%%  *}"
+    for _part in "${(s:,:)_aliases_part[@]}"; do
+        _part="${_part##[[:space:]]#}"
+        _part="${_part%%[[:space:]]*}"
+        [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
+    done
+}
 
 # ── --help output parser ──────────────────────────────────────────────────────
 # Input:  $1 = raw --help output text
@@ -128,7 +148,7 @@ _finsh_parse_help() {
     [[ -z "$_help_out" ]] && return
 
     local _section="flat"
-    local _line _lc _part
+    local _line _lc
     while IFS= read -r _line; do
 
         # ── Section header detection ─────────────────────────────────────────
@@ -151,17 +171,7 @@ _finsh_parse_help() {
         subcmds)
             # Comma list (npm/cargo style: "  build, b  Compile...")
             if [[ "$_line" =~ '^[[:space:]]{1,8}[a-z][-a-z0-9]*,' ]]; then
-                # Strip the description (aliases and description are separated by 2+ spaces),
-                # then split on commas — avoids commas inside the description text being
-                # treated as alias separators.
-                # e.g. `    check, c    Analyze...errors, but don't...` → take only `check, c`
-                local _trimmed="${_line##[[:space:]]#}"
-                local _aliases_part="${_trimmed%%  *}"
-                for _part in "${(s:,:)_aliases_part[@]}"; do
-                    _part="${_part##[[:space:]]#}"
-                    _part="${_part%%[[:space:]]*}"
-                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
-                done
+                _finsh_parse_comma_list "$_line"
             # cobra style: first word is the program name; consume the whole line.
             # If the second word is a valid subcommand, extract it; otherwise (e.g.
             # "<placeholder>" format like "pi <command> --help") silently skip.
@@ -191,13 +201,7 @@ _finsh_parse_help() {
                 _FINSH_PARSE_OPTS+=("--$match[4]")
             # Comma list
             elif [[ "$_line" =~ '^[[:space:]]{2,8}[a-z][-a-z0-9]*,' ]]; then
-                local _trimmed="${_line##[[:space:]]#}"
-                local _aliases_part="${_trimmed%%  *}"
-                for _part in "${(s:,:)_aliases_part[@]}"; do
-                    _part="${_part##[[:space:]]#}"
-                    _part="${_part%%[[:space:]]*}"
-                    [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
-                done
+                _finsh_parse_comma_list "$_line"
             # cobra style: first word is the program name; if second word is a valid
             # subcommand (followed by 2+ spaces) extract it
             elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
@@ -329,15 +333,12 @@ _finsh_filter() {
     r=( ${(M)pool:#*${~w}*} )
     if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
-    # Pass 2b ── head-anchored subsequence (first letter literal, rest subsequence)
-    local tail="*" i
-    for (( i = 2; i <= $#word; i++ )); do tail+="${(b)word[i]}*"; done
-    r=()
-    local c
-    for c in "${pool[@]}"; do
-        [[ "${c[1]}" == "${word[1]}" ]] || continue
-        [[ "${c[2,-1]}" == ${~tail}  ]] && r+=("$c")
-    done
+    # Pass 2b ── head-anchored subsequence (first letter literal, rest as subsequence glob)
+    # Build "p*i*c*l*a*u*d*" for "piclaud"; zsh glob runs in C, avoiding per-element zsh loops.
+    local head_pat="${(b)word[1]}" i
+    for (( i = 2; i <= $#word; i++ )); do head_pat+="*${(b)word[i]}"; done
+    head_pat+="*"
+    r=( ${(M)pool:#${~head_pat}} )
     if (( $#r )); then _FINSH_FILTERED=( "${r[@]}" ); return; fi
 
     # Pass 2c ── pure subsequence
@@ -776,11 +777,15 @@ _finsh_search_history() {
     _FINSH_SUGGESTION=""
     [[ -z "$needle" ]] && return
 
-    local -a nums
-    nums=( ${(Onk)history} )   # event numbers largest-first (most recent first);
-                                # no outer quotes — otherwise @On treats all keys as one string
+    # Rebuild the sorted event-number list only when history has grown (once per accepted
+    # command), not on every pre-redraw keystroke.  Avoids O(n log n) re-sort on every key.
+    if (( $#history != _FINSH_HIST_SIZE )); then
+        _FINSH_HIST_NUMS=( ${(Onk)history} )   # no outer quotes — see AGENTS.md Bug 13
+        _FINSH_HIST_SIZE=$#history
+    fi
+
     local num entry
-    for num in "${nums[@]}"; do
+    for num in "${_FINSH_HIST_NUMS[@]}"; do
         entry="${history[$num]}"
         if [[ "$entry" == "${needle}"* ]] && [[ "$entry" != "$needle" ]]; then
             _FINSH_SUGGESTION="${entry#$needle}"

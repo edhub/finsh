@@ -22,7 +22,7 @@ typeset -ga _FINSH_PARSE_SUBCMDS
 typeset -ga _FINSH_PARSE_OPTS
 typeset -ga _FINSH_FILTERED
 source <(awk '
-    /^_finsh_parse_help\(\)|^_finsh_filter\(\)|^_finsh_parse_man\(\)/ { in_fn=1; brace=0 }
+    /^_finsh_parse_comma_list\(\)|^_finsh_parse_help\(\)|^_finsh_filter\(\)|^_finsh_parse_man\(\)/ { in_fn=1; brace=0 }
     in_fn { print; brace += gsub(/\{/,"{")-gsub(/\}/,"}"); if (brace==0 && NR>1) in_fn=0 }
 ' "$_SCRIPT_DIR/finsh.zsh")
 
@@ -439,6 +439,92 @@ run_test "edge: -- inside description must not be matched as an option" \
 _assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "build"     "desc-with-dash: build enters pool normally"
 _assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "test"      "desc-with-dash: test enters pool normally"
 _assert_not_contains "${_FINSH_PARSE_OPTS[@]}"    "--release" "desc-with-dash: --release inside description must not enter opts pool"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 9: cobra standard format ("Available Commands:" section, no program prefix)
+# ─────────────────────────────────────────────────────────────────────────────
+run_test "cobra  (Available Commands, standard format without program prefix)" \
+'A CLI tool built with cobra
+
+Usage:
+  mytool [command]
+
+Available Commands:
+  completion  Generate autocompletion script for the specified shell
+  help        Help about any command
+  install     Install a package
+  remove      Remove a package
+  update      Update packages
+
+Flags:
+  -h, --help      help for mytool
+  -v, --verbose   verbose output
+      --version   Print version'
+
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "completion" "cobra std: completion"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "help"       "cobra std: help"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "install"    "cobra std: install"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "remove"     "cobra std: remove"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "update"     "cobra std: update"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--help"     "cobra std: --help flag"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--verbose"  "cobra std: --verbose flag"
+_assert_contains "${_FINSH_PARSE_OPTS[@]}"    "--version"  "cobra std: --version flag"
+# Description words must not enter the pool
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Generate" "cobra std: description word must not enter pool"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 10: cobra pi-style ("  pi subcmd" lines with program name prefix)
+# ─────────────────────────────────────────────────────────────────────────────
+print "\n── cobra/pi-style  (Available Commands, program name prefix)"
+_finsh_parse_help \
+'pi is a coding agent
+
+Usage:
+  pi [command]
+
+Available Commands:
+  pi install    Install packages
+  pi update     Update packages
+  pi remove     Remove a package
+  pi list       List installed packages
+  pi <command>  Run arbitrary command (placeholder — must be skipped)
+
+Flags:
+  -h, --help      help for pi
+  -v, --verbose   verbose output' "pi"
+
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "install"    "pi cobra: install"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "update"     "pi cobra: update"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "remove"     "pi cobra: remove"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "list"       "pi cobra: list"
+_assert_contains     "${_FINSH_PARSE_OPTS[@]}"    "--help"     "pi cobra: --help flag"
+_assert_contains     "${_FINSH_PARSE_OPTS[@]}"    "--verbose"  "pi cobra: --verbose flag"
+# "<command>" placeholder must not enter the pool (does not match [a-z][-a-z0-9]*)
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "<command>"  "pi cobra: '<command>' placeholder must not enter pool"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _finsh_parse_comma_list unit tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+print "\n── _finsh_parse_comma_list: direct unit tests"
+
+_FINSH_PARSE_SUBCMDS=()
+_finsh_parse_comma_list "    build, b  Compile the project"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "build"   "_finsh_parse_comma_list: build"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "b"       "_finsh_parse_comma_list: b (alias)"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "Compile" "_finsh_parse_comma_list: description word 'Compile' must not enter pool"
+
+_FINSH_PARSE_SUBCMDS=()
+_finsh_parse_comma_list "    check, c    Analyze the package for errors, but don't build"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "check" "_finsh_parse_comma_list: check"
+_assert_contains     "${_FINSH_PARSE_SUBCMDS[@]}" "c"     "_finsh_parse_comma_list: c (alias)"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "but"   "_finsh_parse_comma_list: Bug18 'but' from description must not enter pool"
+_assert_not_contains "${_FINSH_PARSE_SUBCMDS[@]}" "don"   "_finsh_parse_comma_list: 'don' from description must not enter pool"
+
+_FINSH_PARSE_SUBCMDS=()
+_finsh_parse_comma_list "    run, r  Run a binary"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "run" "_finsh_parse_comma_list: run"
+_assert_contains "${_FINSH_PARSE_SUBCMDS[@]}" "r"   "_finsh_parse_comma_list: r (single-char alias)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _finsh_parse_man unit tests
