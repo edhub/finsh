@@ -9,9 +9,10 @@
 ```
 Tab 键
  │
- ├─ 循环检查：LASTWIDGET==本widget && _BLE_CANDS非空
- │            && LBUFFER==_BLE_PFX+_BLE_CANDS[_BLE_IDX]
- │            → 循环到下一候选，展示列表
+ ├─ 第 2 次 Tab：LASTWIDGET==本widget && _BLE_CANDS非空
+ │               && LBUFFER==_BLE_PFX+_BLE_CANDS[_BLE_IDX]
+ │               → 弹出 fzf inline popup（--height=~10，ayu_light 配色）
+ │                 以 _BLE_WORD（原始输入词）作为初始 query
  │
  └─ 新一轮补全
       │
@@ -46,5 +47,5 @@ Tab 键
 |------|------|
 | [docs/matching.md](docs/matching.md) | 匹配优先级（Pass 1–2c）、首字母预过滤、路径补全实现细节 |
 | [docs/subcommand.md](docs/subcommand.md) | 子命令/选项补全、`--help` 状态机、`compadd` hook 与 `zle -C` |
-| [docs/loop-suggestion.md](docs/loop-suggestion.md) | 循环模式状态管理、历史自动建议实现 |
+| [docs/loop-suggestion.md](docs/loop-suggestion.md) | 两段式补全状态管理（内联填入 + fzf popup）、历史自动建议实现 |
 | [docs/bugs.md](docs/bugs.md) | 历史 Bug 记录（Bug 1–17） |

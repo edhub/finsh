@@ -40,9 +40,12 @@ fzf-ble-complete/
 - glob 须加 `D` qualifier（`*(.DN)` / `*(/DN)`）才能匹配 dotfile（Bug 3）
 - 根目录 `xbase=""` 需特判，避免 `//Applications` 双斜杠（Bug 2）
 
-### 循环状态 → [docs/loop-suggestion.md § 循环模式](docs/loop-suggestion.md#循环模式)
+### 两段式补全状态 → [docs/loop-suggestion.md § 两段式补全](docs/loop-suggestion.md#两段式补全)
 
-- 循环条件必须验证 `LBUFFER == _BLE_PFX + _BLE_CANDS[_BLE_IDX]`，否则旧脏状态被误用（Bug 9）
+- 第 2 次 Tab 触发条件必须验证 `LBUFFER == _BLE_PFX + _BLE_CANDS[_BLE_IDX]`，否则旧脏状态被误用（Bug 9）
+- 状态清零时必须同时清 `_BLE_CANDS / _BLE_IDX / _BLE_PFX / _BLE_WORD`，共四个变量
+- `_BLE_WORD` 保存 opts-only 工具下**已加 `--` 前缀的 word**（如 `--bu`），fzf query 直接匹配 `--build` 候选，不能改成存原始词
+- `zle -M` 不支持 ANSI 转义码（ESC → `^[` 字面输出），候选列表只能用纯文本
 
 ### 静默退出 vs fallback → [docs/subcommand.md § pool 为空时的回退策略](docs/subcommand.md#pool-为空时的回退策略)
 

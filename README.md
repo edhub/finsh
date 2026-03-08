@@ -27,14 +27,55 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 
 | 按键 | 行为 |
 |------|------|
-| `Tab` | fuzzy 补全，连按循环切换候选 |
+| `Tab`（第 1 次）| fuzzy 过滤 → 内联填入第一候选，底部展示候选列表 |
+| `Tab`（第 2 次）| 弹出 fzf inline popup，交互选择 |
 | `Shift+Tab` | 原生 zsh 补全（保留上下文感知行为）|
 | `→` | 接受历史自动建议；无建议时退化为 forward-char |
 | 任意其他键 | 接受当前候选，列表消失 |
 
 ---
 
-## 补全行为
+## 两段式补全
+
+### 第 1 次 Tab — 内联预览
+
+按下 Tab 后立即将最佳匹配填入命令行，同时在底部展示所有候选：
+
+```
+❯ brew li
+[list]  link  linkage  livecheck
+```
+
+`[list]` 是当前内联填入的候选，直接敲其他键即可接受并继续输入。
+
+### 第 2 次 Tab — fzf Popup
+
+再次按 Tab 弹出 fzf inline popup，可视化交互选择：
+
+```
+❯ brew li
+  link
+  linkage
+> list
+  livecheck
+  4/4 ──────
+> li
+```
+
+- 已预填第 1 次 Tab 时的输入词作为初始 query，可继续输入过滤
+- `Enter` 确认，`Esc` / `Ctrl-C` 取消（buffer 不变）
+- fzf 所有标准按键均可用（`Ctrl-P/N`、`Ctrl-J/K` 等）
+
+> **依赖**：fzf >= 0.35.0（`--height=~N` 语法需要此版本）
+
+### 配色
+
+Popup 内置 ayu_light 配色。如需替换，在 `~/.zshrc` 中通过 `FZF_DEFAULT_OPTS` 覆盖，
+或 fork 后修改 `_fzf_ble_complete` 中的 `--color` 参数。
+
+---
+
+## 补全场景
 
 | 场景 | 候选来源 |
 |------|----------|
@@ -43,6 +84,8 @@ source ~/.zsh/plugins/fzf-ble-complete.zsh
 | 有注册补全函数的子命令/选项 | `zle -C` + `compadd` hook 截获 zsh 原生补全 |
 | 无注册补全函数的子命令/选项 | 解析 `$cmd [subcmd…] --help` 输出 |
 | 以上均无结果 | 无注册补全函数时回退 `zle complete-word`；有注册函数时静默退出 |
+
+---
 
 ## 匹配优先级
 

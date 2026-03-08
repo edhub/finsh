@@ -10,7 +10,7 @@
 #
 # 补全行为：
 #   首次 Tab  – fuzzy 过滤 → 内联填入第一个候选，zle -M 展示候选列表
-#   再次 Tab  – 循环到下一个候选（$LASTWIDGET 判断是否连续按 Tab）
+#   再次 Tab  – 弹出 fzf inline popup，从候选列表中交互选择
 #   Shift+Tab – 原生 zsh 补全（保留上下文感知行为）
 #   其他按键  – 自动接受当前候选，列表消失
 #
@@ -25,10 +25,12 @@
 # （completion context 内调用的函数无法访问外层 widget 的 local 变量）
 typeset -ga _FZF_BLE_POOL
 
-# 循环补全状态（跨 widget 调用保持，由 $LASTWIDGET 判断是否延续）
-typeset -ga _BLE_CANDS   # 当前循环的候选列表
+# 补全状态（跨 widget 调用保持，由 $LASTWIDGET 判断是否延续）
+# 第 1 次 Tab：填入第一候选，zle -M 展示列表；第 2 次 Tab：弹出 fzf popup
+typeset -ga _BLE_CANDS   # 当前补全的候选列表
 typeset -gi _BLE_IDX=0   # 当前选中索引（1-based）
 typeset -g  _BLE_PFX=""  # 候选词之前的内容（LBUFFER 前缀）
+typeset -g  _BLE_WORD="" # 发起补全时用户输入的原始词（fzf popup query 用）
 
 # _ble_filter 的输出数组（避免 subshell，直接在全局数组中写结果）
 typeset -ga _BLE_FILTERED
@@ -212,22 +214,27 @@ _ble_show_candidates() {
     emulate -L zsh
     local cols=${COLUMNS:-80}
     local -a out=()
-    local line="" i item
+    local line="" line_vis_len=0 i item item_vis_len
 
     for (( i = 1; i <= $#_BLE_CANDS; i++ )); do
+        item_vis_len=${#_BLE_CANDS[$i]}
         if (( i == _BLE_IDX )); then
             item="[${_BLE_CANDS[$i]}]"
+            (( item_vis_len += 2 ))   # 两个方括号各占 1 列
         else
             item="${_BLE_CANDS[$i]}"
         fi
 
         if [[ -z "$line" ]]; then
             line="$item"
-        elif (( ${#line} + ${#item} + 2 > cols )); then
+            line_vis_len=$item_vis_len
+        elif (( line_vis_len + item_vis_len + 2 > cols )); then
             out+=("$line")
             line="$item"
+            line_vis_len=$item_vis_len
         else
             line+="  $item"
+            (( line_vis_len += item_vis_len + 2 ))
         fi
     done
     [[ -n "$line" ]] && out+=("$line")
@@ -312,9 +319,9 @@ _ble_try_path() {
     local xbase="${xdir%/}"         # 去掉末尾 /，防止 "/" → "//" 路径拼接问题
     local -a names
     if [[ -z "$xbase" ]]; then
-        names=( /*(.DN) /*(/DN) )     # 根目录：直接 glob，结果为 /Applications 等
+        names=( /*(.DN) /*(/DN) /*(@DN) )     # 根目录：直接 glob，结果为 /Applications 等
     else
-        names=( "${xbase}"/*(.DN) "${xbase}"/*(/DN) )
+        names=( "${xbase}"/*(.DN) "${xbase}"/*(/DN) "${xbase}"/*(@DN) )
     fi
     names=( "${names[@]#${xbase}/}" )  # 剥离目录前缀，只保留文件名
 
@@ -337,6 +344,7 @@ _ble_try_path() {
 
     _BLE_CANDS=( "${show[@]}" )
     _BLE_PFX="${_prefix}${sep}"
+    _BLE_WORD="$base"
     _BLE_IDX=1
     LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
     _ble_show_candidates
@@ -429,12 +437,31 @@ _fzf_ble_complete() {
     emulate -L zsh
     setopt extendedglob nullglob
 
-    # ── 循环模式：Tab 连按时在候选间切换 ────────────────────────────────────
+    # ── 第 2 次 Tab：弹出 fzf inline popup ──────────────────────────────────
     if [[ "$LASTWIDGET" == "_fzf_ble_complete" ]] && (( $#_BLE_CANDS )) \
         && [[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]; then
-        _BLE_IDX=$(( (_BLE_IDX % $#_BLE_CANDS) + 1 ))
-        LBUFFER="${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}"
-        _ble_show_candidates
+
+        # 快照当前状态，清零全局避免 fzf 返回后状态污染
+        local pfx="${_BLE_PFX}" typed="${_BLE_WORD}"
+        local -a cands=("${_BLE_CANDS[@]}")
+        _BLE_CANDS=(); _BLE_IDX=0; _BLE_PFX=""; _BLE_WORD=""
+        zle -M ""
+
+        local selected
+        selected=$(printf '%s\n' "${cands[@]}" | fzf \
+            --height=~10 \
+            --layout=reverse \
+            --no-sort \
+            --query="$typed" \
+            --color='fg:#575F66,bg:#FAFAFA,hl:#399EE6' \
+            --color='fg+:#575F66,bg+:#EAE8E3,hl+:#399EE6,gutter:#FAFAFA' \
+            --color='border:#D9D8D7,prompt:#86B300,pointer:#F07171' \
+            2>/dev/null)
+
+        if [[ -n "$selected" ]]; then
+            LBUFFER="${pfx}${selected}"
+        fi
+        zle reset-prompt
         return
     fi
 
@@ -442,9 +469,10 @@ _fzf_ble_complete() {
     _BLE_CANDS=()
     _BLE_IDX=0
     _BLE_PFX=""
+    _BLE_WORD=""
 
     # 光标不在行尾时回退原生补全
-    (( CURSOR != ${#LBUFFER} )) && { zle complete-word; return }
+    (( CURSOR != ${#BUFFER} )) && { zle complete-word; return }
 
     local lbuf=$LBUFFER
     local word prefix
@@ -515,9 +543,10 @@ _fzf_ble_complete() {
         return
     fi
 
-    # ── 填入第一个候选，启动循环模式，展示候选列表 ───────────────────────────
+    # ── 填入第一个候选，启动补全模式，展示候选列表 ───────────────────────────
     _BLE_CANDS=( "${show[@]}" )
     _BLE_PFX="$prefix"
+    _BLE_WORD="$word"
     _BLE_IDX=1
     LBUFFER="${_BLE_PFX}${_BLE_CANDS[1]}"
     _ble_show_candidates
@@ -551,7 +580,7 @@ _ble_update_suggestion() {
     # 清除旧高亮（memo=ble-sug 标识本插件的条目）
     region_highlight=( ${region_highlight:#*memo=ble-sug} )
 
-    if (( $#_BLE_CANDS )) || (( CURSOR != ${#LBUFFER} )); then
+    if (( $#_BLE_CANDS )) || (( CURSOR != ${#BUFFER} )); then
         POSTDISPLAY=""
         return
     fi
@@ -617,6 +646,7 @@ _ble_pre_redraw() {
         _BLE_CANDS=()
         _BLE_IDX=0
         _BLE_PFX=""
+        _BLE_WORD=""
         zle -M ""
     fi
     _ble_update_suggestion

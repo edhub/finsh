@@ -1,36 +1,76 @@
-# 循环模式与历史自动建议
+# 两段式补全与历史自动建议
 
 > 返回 [DESIGN.md](../DESIGN.md)
 
 ---
 
-## 循环模式
+## 两段式补全
+
+补全状态由四个全局变量维持，跨 widget 调用保持：
 
 ```zsh
-# 状态变量（全局，跨 widget 调用）
 typeset -ga _BLE_CANDS   # 候选列表
 typeset -gi _BLE_IDX=0   # 当前索引（1-based）
 typeset -g  _BLE_PFX=""  # 候选前缀（LBUFFER 的不变部分）
+typeset -g  _BLE_WORD="" # 用户输入的原始词（fzf popup query 用）
 ```
 
-### 循环触发条件（三个都要满足）
+### 第 1 次 Tab — 内联填入
+
+`_fzf_ble_complete` 收集候选、过滤，将第一候选写入 `LBUFFER`，
+用 `zle -M` 在提示符下方展示候选列表（`[当前项]` 加方括号标记）：
+
+```
+[list]  link  linkage  livecheck
+```
+
+同时保存 `_BLE_WORD`（用户输入的原始词，如 `li`），供第 2 次 Tab 作为 fzf 初始 query。
+
+### 第 2 次 Tab — fzf Popup
+
+第 2 次 Tab 触发条件（三个都要满足）：
 
 ```zsh
-[[ "$LASTWIDGET" == "_fzf_ble_complete" ]]                          # 上一个 widget 是本 widget
-&& (( $#_BLE_CANDS ))                                               # 有候选
-&& [[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]       # buffer 与上次一致
+[[ "$LASTWIDGET" == "_fzf_ble_complete" ]]                        # 上一个 widget 是本 widget
+&& (( $#_BLE_CANDS ))                                             # 有候选
+&& [[ "$LBUFFER" == "${_BLE_PFX}${_BLE_CANDS[$_BLE_IDX]}" ]]     # buffer 与上次填入一致
 ```
 
-第三个条件是关键——验证当前 buffer 确实处于上次设好的循环位置，防止旧 `_BLE_CANDS` 脏状态被误用。
+第三个条件是关键——防止旧 `_BLE_CANDS` 脏状态被误用（用户可能手动修改了 buffer）。
+
+触发后：
+
+1. 快照 `_BLE_PFX` / `_BLE_CANDS` / `_BLE_WORD` 到局部变量
+2. 立即清零全局状态、清除 `zle -M` 消息，避免 fzf 返回后状态污染
+3. 启动 fzf（`--height=~10` 内联模式，`--query="$typed"` 预填原始输入词）
+4. 用户选择后将 `${pfx}${selected}` 写入 `LBUFFER`；取消则 buffer 不变
+
+```zsh
+# fzf 调用核心
+selected=$(printf '%s\n' "${cands[@]}" | fzf \
+    --height=~10 \
+    --layout=reverse \
+    --no-sort \              # 保留 _ble_filter 的优先级排序
+    --query="$typed" \       # 预填用户原始输入，可继续过滤
+    --color='...' \          # ayu_light 配色
+    2>/dev/null)
+```
+
+`--no-sort` 保留 `_ble_filter` 按 Pass 1→2c 排好的优先级顺序，
+不让 fzf 自己重排（fzf 默认按匹配分重排）。
 
 ### 状态清理
 
-- **新一轮补全开始时**：widget 顶部显式清零
-- **其他键触发 `zle-line-pre-redraw`**：检测到 `$LASTWIDGET ≠ _fzf_ble_complete` 时清零并调 `zle -M ""`
+| 时机 | 操作 |
+|------|------|
+| 新一轮补全开始（widget 顶部）| 显式清零 `_BLE_CANDS / _BLE_IDX / _BLE_PFX / _BLE_WORD` |
+| fzf popup 触发前 | 同上（快照后立即清零） |
+| 其他键触发 `zle-line-pre-redraw` | 检测到 `$LASTWIDGET ≠ _fzf_ble_complete` 时清零并调 `zle -M ""` |
 
 > ⚠️ **修改注意**
-> - 循环条件三个都要满足，缺少 buffer 验证会导致旧 `_BLE_CANDS` 脏状态被误用
-> - 用 `zle -M` 展示候选，`${#item} + 2` 做换行宽度预估
+> - 第 2 次 Tab 的触发条件三个都要满足，缺少 buffer 验证会导致脏状态被误用（Bug 9）
+> - `_BLE_WORD` 保存的是 opts-only 工具场景下**已经加了 `--` 前缀的 word**（如用户输入 `bu`，`_BLE_WORD` 为 `--bu`），这样 fzf query 能直接匹配 `--build` 候选，是正确行为
+> - `zle -M` 不支持 ANSI 转义码（ESC 会被显示为 `^[`），候选列表只能用纯文本 + `[方括号]` 标记
 
 ---
 
@@ -77,7 +117,7 @@ region_highlight+=( "${p} $((p + ${#_BLE_SUGGESTION})) fg=8 memo=ble-sug" )
 region_highlight=( ${region_highlight:#*memo=ble-sug} )
 ```
 
-### 与补全循环共存
+### 与补全共存
 
 `_ble_pre_redraw` 在 `LASTWIDGET == "_fzf_ble_complete"` 时直接清空 `POSTDISPLAY` 并 return，补全候选列表与灰色建议不会同时出现。
 
