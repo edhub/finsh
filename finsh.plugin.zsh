@@ -937,7 +937,9 @@ zle -N _finsh_autosuggest_accept
 #   other-plugin-after  → other-after → _finsh_orig_accept_line(=_finsh_accept_line) → built-in
 # Using `.accept-line` (the hard-coded built-in) would bypass every other
 # plugin's wrapper and break the chain.
-zle -A accept-line _finsh_orig_accept_line
+# Guard: only capture the real accept-line once; re-sourcing would otherwise
+# make _finsh_orig_accept_line point back to _finsh_accept_line → infinite loop.
+(( ${+widgets[_finsh_orig_accept_line]} )) || zle -A accept-line _finsh_orig_accept_line
 _finsh_accept_line() {
     emulate -L zsh
     POSTDISPLAY=""
