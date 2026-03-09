@@ -188,6 +188,8 @@ All passes pre-filter by first letter before running. Passes degrade in order; t
 | `AGENTS.md` | Modification traps and syntax pitfalls (for contributors and AI agents) |
 | `tests/test-help-parser.zsh` | Unit tests for `_finsh_parse_help` and `_finsh_filter` |
 
+Run tests: `zsh tests/test-help-parser.zsh`
+
 ---
 
 ## Directory Jump (`j`)

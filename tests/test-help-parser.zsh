@@ -21,8 +21,9 @@ _SCRIPT_DIR="${0:A:h}/.."
 typeset -ga _FINSH_PARSE_SUBCMDS
 typeset -ga _FINSH_PARSE_OPTS
 typeset -ga _FINSH_FILTERED
+typeset -g  _FINSH_RE_ESCAPED
 source <(awk '
-    /^_finsh_parse_comma_list\(\)|^_finsh_parse_help\(\)|^_finsh_filter\(\)|^_finsh_parse_man\(\)/ { in_fn=1; brace=0 }
+    /^_finsh_re_escape\(\)|^_finsh_parse_comma_list\(\)|^_finsh_parse_help\(\)|^_finsh_filter\(\)|^_finsh_parse_man\(\)/ { in_fn=1; brace=0 }
     in_fn { print; brace += gsub(/\{/,"{")-gsub(/\}/,"}"); if (brace==0 && NR>1) in_fn=0 }
 ' "$_SCRIPT_DIR/finsh.zsh")
 

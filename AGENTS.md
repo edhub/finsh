@@ -2,10 +2,9 @@
 
 ## Project Overview
 
-A zsh ZLE widget that completely bypasses zsh's native prefix filtering, implementing Fish shell-style multi-level fuzzy completion.
+A zsh ZLE widget implementing Fish shell-style multi-level fuzzy completion, bypassing zsh's native prefix filtering.
 
-> Architecture and implementation details: [DESIGN.md](DESIGN.md).  
-> Installation and usage: [README.md](README.md).
+> Architecture & implementation details: [DESIGN.md](DESIGN.md) · Installation & usage: [README.md](README.md)
 
 ---
 
@@ -15,96 +14,88 @@ A zsh ZLE widget that completely bypasses zsh's native prefix filtering, impleme
 finsh/
 ├── finsh.zsh             # Single implementation file
 ├── README.md             # Installation, keybindings, completion behaviour
-├── DESIGN.md             # Design document (architecture, implementation details, bug history)
-└── AGENTS.md             # This file (AI agent context)
+├── DESIGN.md             # Architecture, implementation details, bug history
+└── AGENTS.md             # This file
 ```
 
-Production install path: `~/.zsh/plugins/finsh.zsh`
+Production install path: `~/.zsh/plugins/finsh.zsh`  
+Run tests: `zsh tests/test-help-parser.zsh`
 
 ---
 
-## Read Before Modifying
+## Constraints (read before modifying)
 
-Every constraint below has a corresponding bug history entry in [DESIGN.md § Bug History](DESIGN.md#bug-history).
+Every rule below corresponds to a bug history entry in [DESIGN.md § Bug History](DESIGN.md#bug-history).
 
 ### compadd hook → [DESIGN.md § compadd Hook and zle -C](DESIGN.md#compadd-hook-and-zle--c)
 
-- Must use `zle -C`; calling `zle complete-word` directly goes through the C layer and the hook is never invoked
-- `_FINSH_POOL` must be `typeset -ga`; `_finsh_capture` must be defined at the top level of the file
-- Do **not** call `builtin compadd`, or zsh will trigger "do you wish to see all N possibilities?"
-- Combined flags (e.g. `-qS`) must be checked with a regex for flag characters that take an argument, then `skip_next=1`; otherwise the suffix value (e.g. `=`) is treated as a candidate (Bug 8)
+- Use `zle -C`, not `zle complete-word` directly — the C layer bypasses the function-level hook
+- `_FINSH_POOL` must be `typeset -ga`; `_finsh_capture` must be defined at file top level
+- Do **not** call `builtin compadd` — triggers "do you wish to see all N possibilities?"
+- Combined flags (e.g. `-qS`): detect arg-taking flag chars with a regex and set `skip_next=1`; otherwise the suffix value (e.g. `=`) enters the candidate pool (Bug 8)
 
 ### Path completion → [DESIGN.md § Path Completion](DESIGN.md#path-completion)
 
-- `~` does not expand inside double quotes; use `${dir/#\~/$HOME}` to substitute (Bug 1)
-- glob must include the `D` qualifier (`*(.DN)` / `*(/DN)`) to match dotfiles (Bug 3)
-- Root directory `xbase=""` requires special handling to avoid `//Applications` double slashes (Bug 2)
+- `~` does not expand in double quotes — use `${dir/#\~/$HOME}` (Bug 1)
+- Glob qualifiers must include `D` (`*(.DN)`, `*(/DN)`) to match dotfiles (Bug 3)
+- Root dir (`xbase=""`): glob as `/*(.DN)` etc. to avoid `//` double slashes (Bug 2)
+- Filenames with spaces: `_FINSH_CANDS` stores `${(@q)names}` (shell-quoted for LBUFFER insertion); `_FINSH_SHOW_POOL` stores raw names (for re-filtering); `_FINSH_CANDS_PATH=1` marks path mode; display uses `${(Q)cand}`; pre-redraw refilter re-applies `(q)` when `_FINSH_CANDS_PATH=1` (Bug 22)
 
 ### Cycle state → [DESIGN.md § Cycle Mode](DESIGN.md#cycle-mode)
 
-- The cycle condition must verify `LBUFFER == _FINSH_PFX + _FINSH_CANDS[_FINSH_IDX]`; without this check, stale state is reused (Bug 9)
+- Cycle condition must verify `LBUFFER == _FINSH_PFX + _FINSH_CANDS[_FINSH_IDX]`; without this, stale state is reused (Bug 9)
 
 ### Silent exit vs fallback → [DESIGN.md § Fallback Strategy](DESIGN.md#fallback-strategy)
 
-- Registered completion function exists but pool is empty → **fall back to `--help` path first**; only exit silently if help also yields nothing
-- No registered function and help yields nothing → fallback `zle complete-word` (Bug 7 / Bug 15)
-- `_arguments`-based completion functions (e.g. `_hx`) use the `comparguments` C builtin, which **bypasses** the function-level compadd hook, leaving the pool permanently empty; the fallback path handles this (Bug 15)
+- Registered fn exists but pool empty → fall back to `--help` first; exit silently only if help also yields nothing
+- No registered fn and help yields nothing → `zle complete-word`
+- `_arguments`-based fns (e.g. `_hx`) bypass the compadd hook via the `comparguments` C builtin; the `--help` fallback handles this (Bug 15)
 
 ### man page parsing → [DESIGN.md § Man Page Parsing](DESIGN.md#man-page-parsing-_finsh_parse_man)
 
-- `_finsh_parse_man` is the final fallback when `--help` yields no results; retrieves text via `man -P cat $cmd | col -bx`
-- Section headers: all-uppercase without a colon (`COMMANDS`, `OPTIONS`); line length ≤ 40 chars
-- `other` state (includes `DESCRIPTION`) detects BSD inline options: `3–12 spaces + -x + 1+ spaces` (ssh/cp style)
-- `subcmds` state requires the name to be followed by `" ["` or end-of-line, to filter out prose lines like `"target-session is tried"`
-- Cache key prefixed with `"man:"`, reusing `_FINSH_HELP_CACHE` (only one fork per session)
-- Known limitation: tmux commands are spread across sub-sections (`CLIENTS AND SESSIONS`, etc.) rather than a `COMMANDS` section → man parsing does not work for tmux; use `tmux list-commands` instead
+- Final fallback; retrieves text via `man -P cat $cmd | col -bx`; cached under `"man:$cmd"` in `_FINSH_HELP_CACHE`
+- `subcmds` state: name must be followed by `" ["` or end-of-line — prevents prose lines from entering the pool
+- tmux: commands are in sub-sections, not a top-level `COMMANDS` section — man parsing doesn't work; use `tmux list-commands` instead
 
 ### opts-only tool routing → [DESIGN.md § Opts-Only Tool Routing](DESIGN.md#opts-only-tool-routing)
 
-- When subcmds is empty but opts is non-empty, route to the opts pool even if word does not start with `-` (Bug 16)
-- Prepend `"--"` to `word`: `"bu"` → `"--bu"` → prefix-matches `--build-sea`
-- `_FINSH_PFX` is unchanged; the candidate replaces the original word directly
+- Subcmds empty but opts non-empty: route to opts pool even if word doesn't start with `-` (Bug 16)
+- Prepend `"--"` to word before filtering (`"bu"` → `"--bu"` → matches `--build`); `_FINSH_PFX` is unchanged
 
 ### Mid-line completion → `_FINSH_RBUF`
 
-- Cursor can be anywhere in the line; no early-exit for `CURSOR != ${#BUFFER}`
-- At the start of each new completion round, compute `_rword` = leading non-space chars of `RBUFFER` (the right part of the word under the cursor)
-- `_FINSH_RBUF = RBUFFER[${#_rword}+1,-1]` — the text that should follow the completed word
-- Every candidate fill site must set **both** `LBUFFER` and `RBUFFER="$_FINSH_RBUF"` (show-mode fill, cycle fill, single-candidate fill, path single-candidate fill)
-- When cursor is at a word boundary (RBUFFER starts with space or is empty): `_rword=""` and `_FINSH_RBUF = RBUFFER` — no stripping, most common case
+- No early-exit for `CURSOR != ${#BUFFER}`; cursor can be anywhere
+- Every fill site must set **both** `LBUFFER` and `RBUFFER="$_FINSH_RBUF"`
 
-### `zle -M` message starting with `-` → [DESIGN.md § Bug History](DESIGN.md#bug-history)
+### `zle -M` message starting with `-`
 
-- When the message passed to `zle -M "msg"` starts with `-`, zle parses it as its own option and reports `bad option` (Bug 17)
-- Rule: **whenever the content of a `zle -M` message may start with `-`, always write `zle -M -- "msg"`**
+- `zle -M "msg"` with a message starting with `-` causes `bad option` — always write `zle -M -- "msg"` (Bug 17)
 
 ### History autosuggestion → [DESIGN.md § History Autosuggestion](DESIGN.md#history-autosuggestion)
 
-- Must wrap `accept-line`; `zle-line-finish` fires too late (Bug 14)
-- After clearing the suggestion, set `_FINSH_SUGGESTION_NEEDLE` to `"$LBUFFER"` (not `""`), to prevent `pre-redraw` from re-searching history (Bug 14)
+- Wrap `accept-line`, not `zle-line-finish` — the latter fires too late (Bug 14)
+- Set `_FINSH_SUGGESTION_NEEDLE="$LBUFFER"` (not `""`) after clearing, to prevent pre-redraw from re-searching (Bug 14)
+- Use `zle -A accept-line _finsh_orig_accept_line` **before** defining the wrapper, then call `zle _finsh_orig_accept_line` (not `zle .accept-line`); `.accept-line` hard-codes the built-in and skips every other plugin's wrapper, breaking the chain when load order varies
 
 ### `j` directory history completion
 
-- `_FINSH_DIR_HIST` stores **full paths** of visited directories (most-recently-visited first, deduped, capped at 500)
-- Updated by `_finsh_chpwd` (a `chpwd` hook) on every `cd`; capped at 500 entries; persisted to `$XDG_DATA_HOME/finsh/dir_hist`
-- In `_finsh_collect_subcmd_pool`: if `_cmd` is in `_FINSH_JUMP_CMDS`, build the pool as `"component → /path/prefix"` entries for every (component, ancestor) pair across all paths in `_FINSH_DIR_HIST`; deduplicate with `${(u)}`; the component is at the front so the first-letter pre-filter and prefix matching work normally; `→` is used as delimiter (not `[`/`]`) to avoid zsh glob expansion when the candidate is in LBUFFER
-- If history is empty, emit `zle -M -- "j: no directory history"` and return (never fall through to normal completion)
-- Pool building uses `_jparts`, `_ji`, `_jpath` declared **outside** the outer loop (Bug 12)
-- Jump logic lives in `_finsh_jump()`; at load time, one shell function per name in `_FINSH_JUMP_CMDS` is generated via `eval` to call it
-- `_FINSH_JUMP_CMDS` defaults to `(j)`; set before sourcing to add aliases (e.g. `_FINSH_JUMP_CMDS=(j z)`)
-- `_finsh_jump()` resolution order: ① completion candidate — 3 args `component → /full/path` (`$2 == "→"` && `[[ -d $3 ]]`) → cd `$3` directly ② direct path ③ exact component match at any level, deepest-first (most-recently-visited path wins) ④ substring on full path
-- In `_finsh_jump()`: `local _d _i _target` and `local -a _parts` must be declared **before** the outer loop (Bug 12: `local` inside a loop body prints its value on every iteration)
+- Candidate format: `"component → /full/path"` — `→` avoids glob expansion when the candidate sits in LBUFFER (not `[`/`]`)
+- Pool-building variables (`_jparts`, `_ji`, `_jpath`) must be declared **outside** the outer loop (Bug 12)
+- `_finsh_jump`: search for `→` at **any** argument position (not hardcoded `$# == 3`); join all args after `→` with spaces to reconstruct paths containing spaces
 
 ### Syntax pitfalls
 
-- `${${(Az)prefix}[1]}` to get the first word; do **not** write `${(z)prefix}[1]` (that yields the first character, Bug 6)
-- `${(Onk)history}` without outer quotes; do **not** write `"${(@On)${(k)history}}"` (treats all keys as a single element, Bug 13)
-- `local` declarations must be placed **outside** loop bodies; `typeset` inside a loop body prints its initialisation side-effect to the terminal on every iteration (Bug 12)
+- First word of a string: `${${(Az)prefix}[1]}` — **not** `${(z)prefix}[1]` (yields first character, Bug 6)
+- History keys in order: `${(Onk)history}` — **not** `"${(@On)${(k)history}}"` (single-element, Bug 13)
+- `local`/`typeset` inside a loop body prints its initialisation value on every iteration — declare outside the loop (Bug 12)
+- `${(b)str}` escapes glob metacharacters only — ERE-only chars (`.`, `+`, `(`, `)`, `{`, `}`, `|`, `^`, `$`) are not escaped; use `_finsh_re_escape` (result in `_FINSH_RE_ESCAPED`) for `=~` patterns with dynamic content
+- `}` in `${var//pat/rep}` replacement closes the outer expansion — use `\}` for a literal `}`: `"${s//\}/\\\}}"` (`\\\}` = one `\\` + `\}`)
+- Strip word from LBUFFER with `"${lbuf[1,-${#word}-1]}"` (index-based) — **not** `"${lbuf%${word}}"` (glob chars break it) and **not** `"${lbuf%${(b)word}}"` (`(b)` inserts a literal `\` which `%` treats as part of the pattern, not an escape, Bug 21)
 
 ### `_finsh_filter` → [DESIGN.md § Matching Priority](DESIGN.md#matching-priority)
 
-- The first-letter pre-filter must not be removed (Bug 10)
-- Use `${(b)word}` to escape glob metacharacters in pattern matching
+- First-letter pre-filter must not be removed (Bug 10)
+- Use `${(b)word}` to escape glob metacharacters in pattern matching inside the filter
 
 ---
 
@@ -114,7 +105,7 @@ Every constraint below has a corresponding bug history entry in [DESIGN.md § Bu
 source ~/.zsh/plugins/finsh.zsh
 ```
 
-The script handles `fpath` and `compinit` automatically. If you need to initialise manually before sourcing finsh (e.g. due to ordering requirements with other completion plugins), you may still write:
+The script handles `fpath` and `compinit` automatically. If ordering with other plugins requires manual initialisation:
 
 ```zsh
 fpath=(/opt/homebrew/share/zsh/site-functions $fpath)

@@ -132,6 +132,9 @@ Extraction per state:
 - `opts`: `--flag` lines with or without `-x,` short prefix; `-[a-zA-Z0-9]+` matches multi-char short options (`-nv`, `-4`)
 - `flat`: both subcommands (2–8 space indent + 2+ space gap after name) and `--flag` lines simultaneously
 
+Dynamic content in `=~` patterns is ERE-escaped via `_finsh_re_escape` (writes to `_FINSH_RE_ESCAPED`).
+`${(b)str}` escapes glob metacharacters only — ERE-only chars (`.`, `+`, `(`, `)`, `^`, `|`, `$`, `{`, `}`) are handled by this helper.
+
 ### Man Page Parsing (`_finsh_parse_man`)
 
 Last resort for BSD/POSIX tools (ssh, cp, find) with no `--help`.
@@ -168,6 +171,8 @@ Result shown via `POSTDISPLAY` + `region_highlight` (`fg=8`, `memo=finsh-sug`).
 `accept-line` is wrapped (`_finsh_accept_line`): clears suggestion and sets `_FINSH_SUGGESTION_NEEDLE="$LBUFFER"`.
 Setting needle to `$LBUFFER` (not `""`) prevents pre-redraw from re-searching and restoring the cleared suggestion.
 
+Plugin chaining: `zle -A accept-line _finsh_orig_accept_line` saves whatever `accept-line` currently resolves to (built-in or another plugin's wrapper) before finsh overrides it. The wrapper calls `zle _finsh_orig_accept_line` instead of the hard-coded `zle .accept-line`, so all plugins form a correct chain regardless of load order.
+
 ---
 
 ## Bug History
@@ -194,3 +199,37 @@ Setting needle to `$LBUFFER` (not `""`) prevents pre-redraw from re-searching an
 | 18 | `cargo bu` shows `but` | Strip description before comma-splitting aliases |
 | 19 | `wget --no` misses options | Short option regex: `-[a-zA-Z0-9]+` not `-[a-zA-Z]` |
 | 20 | `wget -hel` → nothing | `_arguments` side-effect filenames in pool mask `--help` path |
+| 21 | `ls ~/Ap` → `ls ~/Ap~/Applications` | `prefix` used `${lbuf%${word}}` which mishandles `~` in glob context; fixed to `${lbuf[1,-${#word}-1]}` (index-based, no glob) |
+| 22 | Path with spaces inserted unquoted | `_finsh_try_path` now stores `${(@q)names}` in `_FINSH_CANDS`; display uses `${(Q)cand}`; `_FINSH_CANDS_PATH` flag triggers re-apply of `(q)` in pre-redraw refilter |
+
+---
+
+## Global Variables Reference
+
+| Variable | Type | Purpose |
+|----------|------|---------|
+| `_FINSH_POOL` | `typeset -ga` | Staging area for `compadd` hook captures (cleared before/after `zle -C` run) |
+| `_FINSH_CANDS` | `typeset -ga` | Current visible candidate list (truncated to `_FINSH_MAX_CANDS`) |
+| `_FINSH_IDX` | `typeset -gi` | Current selection index (1-based; 0 = show mode, no selection) |
+| `_FINSH_PFX` | `typeset -g` | Fixed LBUFFER prefix before the candidate word (unchanged during show/cycle) |
+| `_FINSH_MAX_CANDS` | `typeset -gi` | Max candidates shown/cycled; 0 = unlimited (default: 20) |
+| `_FINSH_TOTAL` | `typeset -gi` | Total candidates before truncation (used for "+N more" hint) |
+| `_FINSH_SHOW_MODE` | `typeset -gi` | 1 = show-without-fill mode; 0 = normal |
+| `_FINSH_SHOW_POOL` | `typeset -ga` | Full deduplicated candidate pool saved for live re-filtering in show mode |
+| `_FINSH_SHOW_WORD_PFX` | `typeset -g` | Prefix prepended to word for filtering in show mode (`"--"` for opts-only tools) |
+| `_FINSH_RBUF` | `typeset -g` | RBUFFER tail to restore when filling a candidate (mid-line: strips right word part) |
+| `_FINSH_FILTERED` | `typeset -ga` | Output of `_finsh_filter`; avoids subshell; empty when word is empty |
+| `_FINSH_HELP_CACHE` | `typeset -gA` | `--help` and man-page output cache; key = command words or `"man:$cmd"` |
+| `_FINSH_PARSE_SUBCMDS` | `typeset -ga` | Output of `_finsh_parse_help` / `_finsh_parse_man`: subcommand list |
+| `_FINSH_PARSE_OPTS` | `typeset -ga` | Output of `_finsh_parse_help` / `_finsh_parse_man`: `--flag` list |
+| `_FINSH_RE_ESCAPED` | `typeset -g` | Output of `_finsh_re_escape`: ERE-escaped string for use in `=~` patterns |
+| `_FINSH_POOL_TMP` | `typeset -ga` | Output of `_finsh_collect_subcmd_pool`: collected candidate pool |
+| `_FINSH_REG_TMP` | `typeset -gi` | Output of `_finsh_collect_subcmd_pool`: 1 if a registered completion fn was found |
+| `_FINSH_WORD_TMP` | `typeset -g` | Output of `_finsh_collect_subcmd_pool`: word, possibly with `"--"` prepended |
+| `_FINSH_SUGGESTION` | `typeset -g` | Current history suggestion suffix (shown as POSTDISPLAY) |
+| `_FINSH_SUGGESTION_NEEDLE` | `typeset -g` | Last LBUFFER searched; avoids re-sorting history on every pre-redraw keystroke |
+| `_FINSH_HIST_SIZE` | `typeset -gi` | History size at last sort; triggers re-sort only when history grows |
+| `_FINSH_HIST_NUMS` | `typeset -ga` | Event numbers in descending order (most-recent first) |
+| `_FINSH_JUMP_CMDS` | `typeset -ga` | Jump command names (default: `(j)`); set before sourcing to override |
+| `_FINSH_DIR_HIST` | `typeset -ga` | Directory visit history (full paths, most-recently-visited first; cap 500) |
+| `_FINSH_DIR_HIST_FILE` | `typeset -g` | Persistence path for `_FINSH_DIR_HIST` (`$XDG_DATA_HOME/finsh/dir_hist`) |

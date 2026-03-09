@@ -50,6 +50,7 @@ typeset -ga _FINSH_POOL
 # First Tab: show mode — display list without filling; continue typing → live
 # filter; Tab again → fill first candidate (cycle mode).
 typeset -ga _FINSH_CANDS   # current candidate list (truncated to _FINSH_MAX_CANDS)
+typeset -gi _FINSH_CANDS_PATH=0  # 1 = candidates are path basenames stored shell-quoted (${(q)})
 typeset -gi _FINSH_IDX=0   # current selection index (1-based; 0 in show mode)
 typeset -g  _FINSH_PFX=""  # content before the candidate word (fixed LBUFFER prefix during show mode)
 : ${_FINSH_MAX_CANDS:=20}; typeset -gi _FINSH_MAX_CANDS  # max candidates; 0 = unlimited; set before sourcing to override
@@ -83,6 +84,9 @@ typeset -ga _FINSH_POOL_TMP=()   # collected candidate pool
 typeset -gi _FINSH_REG_TMP=0     # whether a registered completion function exists (0/1)
 typeset -g  _FINSH_WORD_TMP=""   # word possibly modified by the collector (opts-only tools prepend "--")
 
+# Output variable for _finsh_re_escape (avoids subshell).
+typeset -g  _FINSH_RE_ESCAPED=""
+
 # Directory history for `j` completion (full paths, most-recently-visited first).
 typeset -ga _FINSH_DIR_HIST=()
 typeset -g  _FINSH_DIR_HIST_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/finsh/dir_hist"
@@ -104,6 +108,34 @@ _finsh_parse_comma_list() {
         _part="${_part%%[[:space:]]*}"
         [[ "$_part" =~ '^[a-z][-a-z0-9]*$' ]] && _FINSH_PARSE_SUBCMDS+=("$_part")
     done
+}
+
+# ── ERE escape helper ────────────────────────────────────────────────────────
+# Escape a string for literal use in POSIX ERE (=~ operator).
+# Result written to _FINSH_RE_ESCAPED (avoids subshell).
+#
+# Why not ${(b)str}?  (b) escapes glob metacharacters only (* ? [ ] \).
+# ERE additionally treats . + ( ) { } | ^ $ as metacharacters — these are
+# NOT escaped by (b).  Use this helper wherever =~ patterns include dynamic
+# content (e.g. a command name that might contain a dot: "node.js").
+_finsh_re_escape() {
+    emulate -L zsh   # no extendedglob: ( ) ^ { } | are literal in glob patterns
+    local _s="$1"
+    _s="${_s//\\/\\\\}"    # \ → \\ (must be first to avoid double-escaping)
+    _s="${_s//./\\.}"      # .  literal in glob; ERE special
+    _s="${_s//+/\\+}"      # +  literal in standalone glob; ERE special
+    _s="${_s//\*/\\*}"     # *  glob special
+    _s="${_s//\?/\\?}"     # ?  glob special
+    _s="${_s//\(/\\(}"     # (  extendedglob special; \( = literal ( in all glob modes
+    _s="${_s//\)/\\)}"     # )  extendedglob special; \) = literal )
+    _s="${_s//\[/\\[}"     # [  glob special
+    _s="${_s//\]/\\]}"     # ]  glob special
+    _s="${_s//\^/\\^}"     # ^  extendedglob special; \^ = literal ^
+    _s="${_s//$/\\$}"      # $  literal in glob; ERE special
+    _s="${_s//|/\\|}"      # |  extendedglob in groups; ERE special
+    _s="${_s//\{/\\{}"     # {  literal in glob; ERE quantifier
+    _s="${_s//\}/\\\}}"    # }  literal in glob; ERE quantifier  (\\\} = \\ + \} where \} = literal })
+    _FINSH_RE_ESCAPED="$_s"
 }
 
 # ── --help output parser ──────────────────────────────────────────────────────
@@ -149,6 +181,8 @@ _finsh_parse_help() {
     setopt extendedglob
     local _help_out="$1"
     local _cmdname="${2:t}"  # command basename, used to recognise cobra-style "  pi subcmd" lines
+    _finsh_re_escape "$_cmdname"
+    local _cmdname_re="$_FINSH_RE_ESCAPED"   # ERE-escaped version for =~ patterns
     _FINSH_PARSE_SUBCMDS=()
     _FINSH_PARSE_OPTS=()
     [[ -z "$_help_out" ]] && return
@@ -181,8 +215,8 @@ _finsh_parse_help() {
             # cobra style: first word is the program name; consume the whole line.
             # If the second word is a valid subcommand, extract it; otherwise (e.g.
             # "<placeholder>" format like "pi <command> --help") silently skip.
-            elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{1,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
-                [[ "$_line" =~ '^[[:space:]]{1,8}'"${(b)_cmdname}"'[[:space:]]+([a-z][-a-z0-9]*)' ]] && \
+            elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{1,8}'"${_cmdname_re}"'[[:space:]]' ]]; then
+                [[ "$_line" =~ '^[[:space:]]{1,8}'"${_cmdname_re}"'[[:space:]]+([a-z][-a-z0-9]*)' ]] && \
                     _FINSH_PARSE_SUBCMDS+=("$match[1]")
             # Plain line: 1-8 space indent + lowercase first word (section already scopes it)
             elif [[ "$_line" =~ '^[[:space:]]{1,8}([a-z][-a-z0-9]*)' ]]; then
@@ -210,8 +244,8 @@ _finsh_parse_help() {
                 _finsh_parse_comma_list "$_line"
             # cobra style: first word is the program name; if second word is a valid
             # subcommand (followed by 2+ spaces) extract it
-            elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]' ]]; then
-                [[ "$_line" =~ '^[[:space:]]{2,8}'"${(b)_cmdname}"'[[:space:]]+([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]] && \
+            elif [[ -n "$_cmdname" && "$_line" =~ '^[[:space:]]{2,8}'"${_cmdname_re}"'[[:space:]]' ]]; then
+                [[ "$_line" =~ '^[[:space:]]{2,8}'"${_cmdname_re}"'[[:space:]]+([a-z][-a-z0-9]*)[^[:space:]]*[[:space:]]{2,}' ]] && \
                     _FINSH_PARSE_SUBCMDS+=("$match[1]")
             # Plain line: 2-8 space indent + 2+ space gap after the name.
             # The 2+ space gap filters out "  cmd [ARG]..." USAGE lines (only 1 space after name).
@@ -363,12 +397,13 @@ _finsh_show_candidates() {
     local line="" line_vis_len=0 i item item_vis_len
 
     for (( i = 1; i <= $#_FINSH_CANDS; i++ )); do
-        item_vis_len=${#_FINSH_CANDS[$i]}
+        local _cand_disp="${(Q)_FINSH_CANDS[$i]}"   # (Q) strips one level of shell quoting; no-op for plain strings
+        item_vis_len=${#_cand_disp}
         if (( i == _FINSH_IDX )); then
-            item="[${_FINSH_CANDS[$i]}]"
+            item="[${_cand_disp}]"
             (( item_vis_len += 2 ))   # two brackets each occupy 1 column
         else
-            item="${_FINSH_CANDS[$i]}"
+            item="${_cand_disp}"
         fi
 
         if [[ -z "$line" ]]; then
@@ -500,7 +535,7 @@ _finsh_try_path() {
     fi
 
     if (( $#show == 1 )); then
-        LBUFFER="${_prefix}${sep}${show[1]}"
+        LBUFFER="${_prefix}${sep}${(q)show[1]}"   # (q): escape spaces and shell metacharacters in filename
         RBUFFER="$_FINSH_RBUF"
         zle reset-prompt
         return 0
@@ -508,11 +543,12 @@ _finsh_try_path() {
 
     _FINSH_TOTAL=$#show
     (( _FINSH_MAX_CANDS > 0 && $#show > _FINSH_MAX_CANDS )) && show=( "${(@)show[1,$_FINSH_MAX_CANDS]}" )
-    _FINSH_CANDS=( "${show[@]}" )
+    _FINSH_CANDS=( "${(@q)show}" )   # store shell-quoted form; display strips (Q); cycle/fill uses directly
+    _FINSH_CANDS_PATH=1              # signal: candidates are quoted path basenames
     _FINSH_PFX="${_prefix}${sep}"
     _FINSH_IDX=0
     _FINSH_SHOW_MODE=1
-    _FINSH_SHOW_POOL=( "${names[@]}" )   # save full filename pool for live re-filtering
+    _FINSH_SHOW_POOL=( "${names[@]}" )   # save full RAW filename pool for live re-filtering
     _FINSH_SHOW_WORD_PFX=""              # path completion needs no word-prefix transformation
     _finsh_show_candidates
     return 0
@@ -641,6 +677,13 @@ _finsh_collect_subcmd_pool() {
     # Note: tmux commands are spread across sub-sections (CLIENTS AND SESSIONS, etc.)
     # rather than a COMMANDS section — man parsing is ineffective for tmux;
     # use `tmux list-commands` instead.
+    #
+    # Shared globals note: _finsh_parse_man writes to the same _FINSH_PARSE_SUBCMDS
+    # and _FINSH_PARSE_OPTS arrays as _finsh_parse_help (both clear them at the
+    # start).  This is safe here because we only reach this path when
+    # _FINSH_POOL_TMP is empty — the parse_help results (if any) were already
+    # consumed into _FINSH_POOL_TMP above.  Do NOT call both parsers and expect
+    # both sets of results to coexist in those globals simultaneously.
     if [[ -n "$_cmd" ]] && (( $#_FINSH_POOL_TMP == 0 )); then
         local _man_cache_key="man:${_cmd}"
         local _man_out
@@ -698,6 +741,7 @@ _finsh_complete() {
     _FINSH_IDX=0
     _FINSH_PFX=""
     _FINSH_RBUF=""
+    _FINSH_CANDS_PATH=0
 
     local lbuf=$LBUFFER
 
@@ -719,7 +763,7 @@ _finsh_complete() {
     else
         local words=(${(z)lbuf})
         word="${words[-1]:-''}"
-        prefix="${lbuf%${word}}"
+        prefix="${lbuf[1,-${#word}-1]}"   # index-based: avoids glob matching (~ and other metacharacters)
     fi
 
     # ── Path completion ───────────────────────────────────────────────────────
@@ -884,15 +928,36 @@ zle -N _finsh_autosuggest_accept
 # back to POSTDISPLAY, and the grey text would appear in the final render.
 # Fix: set needle to the current LBUFFER (not ""), so update-sug hits the cache
 # and reuses the already-cleared _FINSH_SUGGESTION="", keeping POSTDISPLAY empty.
+#
+# Plugin chaining: save whatever accept-line currently resolves to (built-in or
+# another plugin's wrapper) before we override it.  Our wrapper calls the saved
+# widget via `zle _finsh_orig_accept_line`, forming a correct chain regardless
+# of load order:
+#   other-plugin-before → _finsh_accept_line → _finsh_orig_accept_line(=other-before)
+#   other-plugin-after  → other-after → _finsh_orig_accept_line(=_finsh_accept_line) → built-in
+# Using `.accept-line` (the hard-coded built-in) would bypass every other
+# plugin's wrapper and break the chain.
+zle -A accept-line _finsh_orig_accept_line
 _finsh_accept_line() {
     emulate -L zsh
     POSTDISPLAY=""
     region_highlight=( ${region_highlight:#*memo=finsh-sug} )
     _FINSH_SUGGESTION=""
     _FINSH_SUGGESTION_NEEDLE="$LBUFFER"   # lock needle to prevent pre-redraw from re-searching history
-    zle .accept-line
+    zle _finsh_orig_accept_line
 }
 zle -N accept-line _finsh_accept_line
+
+# ── Show-mode exit helper ─────────────────────────────────────────────────────
+# Resets all show-mode state and clears the candidate menu.
+# Called from _finsh_pre_redraw in three exit paths: backspace into prefix
+# region, word too short, and no filter match.
+_finsh_exit_show_mode() {
+    _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
+    _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""; _FINSH_CANDS_PATH=0
+    zle -M ""
+    _finsh_update_suggestion
+}
 
 # ── Auto-clear candidate menu ─────────────────────────────────────────────────
 # zle-line-pre-redraw fires before every redraw. If the last widget was not this
@@ -916,19 +981,13 @@ _finsh_pre_redraw() {
             _sm_cur_word="${LBUFFER[${#_FINSH_PFX}+1,-1]}"
         else
             # User backspaced into the prefix region: exit show mode
-            _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
-            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""
-            zle -M ""
-            _finsh_update_suggestion
+            _finsh_exit_show_mode
             return
         fi
 
         # Current word shorter than 1 character: exit show mode (user backspaced)
         if (( ${#_sm_cur_word} < 1 )); then
-            _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
-            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""
-            zle -M ""
-            _finsh_update_suggestion
+            _finsh_exit_show_mode
             return
         fi
 
@@ -943,10 +1002,7 @@ _finsh_pre_redraw() {
             _sm_show=("${_FINSH_SHOW_POOL[@]}")
         else
             # No match: exit show mode and clear the candidate list
-            _FINSH_SHOW_MODE=0; _FINSH_SHOW_POOL=(); _FINSH_SHOW_WORD_PFX=""
-            _FINSH_CANDS=(); _FINSH_IDX=0; _FINSH_PFX=""
-            zle -M ""
-            _finsh_update_suggestion
+            _finsh_exit_show_mode
             return
         fi
 
@@ -954,7 +1010,12 @@ _finsh_pre_redraw() {
         # (_FINSH_IDX=0 → no bracket highlight; no selection in show mode)
         _FINSH_TOTAL=$#_sm_show
         (( _FINSH_MAX_CANDS > 0 && $#_sm_show > _FINSH_MAX_CANDS )) && _sm_show=( "${(@)_sm_show[1,$_FINSH_MAX_CANDS]}" )
-        _FINSH_CANDS=( "${_sm_show[@]}" )
+        # Path candidates are stored shell-quoted in _FINSH_CANDS so that cycle/fill can use them directly
+        if (( _FINSH_CANDS_PATH )); then
+            _FINSH_CANDS=( "${(@q)_sm_show}" )
+        else
+            _FINSH_CANDS=( "${_sm_show[@]}" )
+        fi
         _FINSH_IDX=0
         POSTDISPLAY=""
         region_highlight=( ${region_highlight:#*memo=finsh-sug} )
@@ -967,6 +1028,7 @@ _finsh_pre_redraw() {
         _FINSH_CANDS=()
         _FINSH_IDX=0
         _FINSH_PFX=""
+        _FINSH_CANDS_PATH=0
         zle -M ""
     fi
     _finsh_update_suggestion
@@ -1005,9 +1067,16 @@ _finsh_jump() {
         return
     fi
     local _q="$1"
-    # Candidate filled by completion arrives as 3 shell words: "component → /full/path"
-    if (( $# == 3 )) && [[ "$2" == "→" ]]; then
-        local _d3="${3/#\~/$HOME}"
+    # Candidate filled by completion: "component → /full/path"
+    # Search for → at any argument position so that paths containing spaces
+    # (which the shell splits into multiple words) are correctly reassembled.
+    local _arrow_idx=0 _ai
+    for (( _ai = 2; _ai <= $#; _ai++ )); do
+        [[ "${@[$_ai]}" == "→" ]] && { _arrow_idx=$_ai; break; }
+    done
+    if (( _arrow_idx > 0 && _arrow_idx < $# )); then
+        local _d3="${(j: :)@[$_arrow_idx+1,-1]}"
+        _d3="${_d3/#\~/$HOME}"
         [[ -d "$_d3" ]] && { cd "$_d3"; return; }
     fi
     # Direct path (absolute or ~-prefixed)
