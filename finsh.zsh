@@ -53,6 +53,7 @@ typeset -ga _FINSH_CANDS   # current candidate list (truncated to _FINSH_MAX_CAN
 typeset -gi _FINSH_IDX=0   # current selection index (1-based; 0 in show mode)
 typeset -g  _FINSH_PFX=""  # content before the candidate word (fixed LBUFFER prefix during show mode)
 : ${_FINSH_MAX_CANDS:=20}; typeset -gi _FINSH_MAX_CANDS  # max candidates; 0 = unlimited; set before sourcing to override
+typeset -ga _FINSH_JUMP_CMDS; (( $#_FINSH_JUMP_CMDS )) || _FINSH_JUMP_CMDS=( j )  # jump command names; set before sourcing to override (e.g. _FINSH_JUMP_CMDS=(j z))
 typeset -gi _FINSH_TOTAL=0       # total candidates before truncation (used for "+N more" hint)
 
 # Show-mode state (entered on first Tab, exited and filled on second Tab).
@@ -81,6 +82,11 @@ typeset -ga _FINSH_HIST_NUMS=()         # event numbers in descending order; reb
 typeset -ga _FINSH_POOL_TMP=()   # collected candidate pool
 typeset -gi _FINSH_REG_TMP=0     # whether a registered completion function exists (0/1)
 typeset -g  _FINSH_WORD_TMP=""   # word possibly modified by the collector (opts-only tools prepend "--")
+
+# Directory history for `j` completion (full paths, most-recently-visited first).
+typeset -ga _FINSH_DIR_HIST=()
+typeset -g  _FINSH_DIR_HIST_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/finsh/dir_hist"
+[[ -f "$_FINSH_DIR_HIST_FILE" ]] && _FINSH_DIR_HIST=( ${(f)"$(<$_FINSH_DIR_HIST_FILE)"} )
 
 # ── Comma-list helper ─────────────────────────────────────────────────────────
 # Parse one comma-separated alias line from --help output and append valid
@@ -535,6 +541,35 @@ _finsh_collect_subcmd_pool() {
 
     local _cmd="${${(Az)_prefix}[1]-}"
 
+    # ── j: complete from directory history ───────────────────────────────────
+    # Expand every recorded path into all its components so that any level can
+    # be matched: history has /Users/edh/dev/shell/finsh → pool includes
+    # "Users", "edh", "dev", "shell", "finsh" (empty leading segment filtered).
+    # Pool format: "component  [/path/prefix]" for every (component, ancestor)
+    # pair derived from _FINSH_DIR_HIST.  The component is at the front so the
+    # first-letter pre-filter and prefix matching work normally.  After the user
+    # selects a candidate, j() extracts the path from the brackets and cds there.
+    if (( ${_FINSH_JUMP_CMDS[(I)$_cmd]} )); then
+        if (( $#_FINSH_DIR_HIST == 0 )); then
+            zle -M -- "j: no directory history"
+            return
+        fi
+        local -a _j_pool=() _jparts=()
+        local _jd _jseg _jpath _ji
+        for _jd in "${_FINSH_DIR_HIST[@]}"; do
+            _jparts=( ${(s:/:)_jd} )
+            for (( _ji = 1; _ji <= ${#_jparts}; _ji++ )); do
+                _jseg="${_jparts[$_ji]}"
+                [[ -z "$_jseg" ]] && continue
+                _jpath="/${(j:/:)_jparts[1,$_ji]}"
+                [[ "$_jpath" == "$HOME"* ]] && _jpath="~${_jpath#$HOME}"
+                _j_pool+=( "${_jseg} → ${_jpath}" )
+            done
+        done
+        _FINSH_POOL_TMP=( ${(u)_j_pool} )
+        return
+    fi
+
     if [[ -n "${_comps[$_cmd]-}" ]]; then
         # ── Registered completion function: use the zle -C capture path ──────
         _FINSH_REG_TMP=1
@@ -938,6 +973,77 @@ _finsh_pre_redraw() {
 }
 autoload -Uz add-zle-hook-widget
 add-zle-hook-widget zle-line-pre-redraw _finsh_pre_redraw
+
+# ── Directory history hook ────────────────────────────────────────────────────
+# Prepend the full path of the new directory to _FINSH_DIR_HIST on every `cd`.
+# Deduplicates (most-recently-visited first); capped at 500 entries; persisted to file.
+_finsh_chpwd() {
+    [[ "$PWD" == "/" ]] && return
+    _FINSH_DIR_HIST=( "$PWD" ${_FINSH_DIR_HIST:#$PWD} )
+    (( $#_FINSH_DIR_HIST > 500 )) && _FINSH_DIR_HIST=( "${_FINSH_DIR_HIST[1,500]}" )
+    print -l "${_FINSH_DIR_HIST[@]}" >| "$_FINSH_DIR_HIST_FILE"
+}
+autoload -Uz add-zsh-hook
+[[ -d "${_FINSH_DIR_HIST_FILE:h}" ]] || mkdir -p "${_FINSH_DIR_HIST_FILE:h}"
+add-zsh-hook chpwd _finsh_chpwd
+
+# ── Directory jump implementation ─────────────────────────────────────────────
+# Called by every command listed in _FINSH_JUMP_CMDS (default: j).
+# Usage: <cmd> [term]
+#   no args  → cd ~
+#   term     → resolution order:
+#               1. completion candidate "component  [/full/path]" → cd to path
+#               2. direct path (absolute or ~-prefixed)
+#               3. exact component match at any path level, deepest first
+#                  (j finsh → /Users/edh/dev/shell/finsh)
+#                  (j shell → /Users/edh/dev/shell)
+#               4. substring match on full path (fallback)
+#              Most-recently-visited wins when multiple paths match.
+_finsh_jump() {
+    if (( $# == 0 )); then
+        cd ~
+        return
+    fi
+    local _q="$1"
+    # Candidate filled by completion arrives as 3 shell words: "component → /full/path"
+    if (( $# == 3 )) && [[ "$2" == "→" ]]; then
+        local _d3="${3/#\~/$HOME}"
+        [[ -d "$_d3" ]] && { cd "$_d3"; return; }
+    fi
+    # Direct path (absolute or ~-prefixed)
+    local _qexp="${_q/#\~/$HOME}"
+    if [[ -d "$_qexp" ]]; then
+        cd "$_qexp"
+        return
+    fi
+    # Exact component match at any depth (deepest component wins within a path;
+    # most-recently-visited path wins across paths).
+    local _d _i _target
+    local -a _parts
+    for _d in "${_FINSH_DIR_HIST[@]}"; do
+        _parts=( ${(s:/:)_d} )
+        for (( _i = ${#_parts}; _i >= 1; _i-- )); do
+            if [[ "${_parts[$_i]}" == "$_q" ]]; then
+                _target="/${(j:/:)_parts[1,$_i]}"
+                [[ -d "$_target" ]] && { cd "$_target"; return; }
+                break
+            fi
+        done
+    done
+    # Substring match on full path
+    for _d in "${_FINSH_DIR_HIST[@]}"; do
+        [[ "$_d" == *"$_q"* ]] && { cd "$_d"; return; }
+    done
+    print -u2 "j: no match for '$_q'"
+    return 1
+}
+
+# Register one shell function per configured jump command name.
+local _finsh_jcmd
+for _finsh_jcmd in "${_FINSH_JUMP_CMDS[@]}"; do
+    functions[$_finsh_jcmd]='_finsh_jump "$@"'
+done
+unset _finsh_jcmd
 
 zle -N _finsh_complete
 bindkey '^I'   _finsh_complete   # Tab

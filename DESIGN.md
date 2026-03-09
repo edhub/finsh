@@ -30,6 +30,9 @@ Tab
       │
       └─ subcommand / option → _finsh_collect_subcmd_pool
            │
+           ├─ cmd == "j" && _FINSH_DIR_HIST non-empty
+           │   → pool = _FINSH_DIR_HIST (all path components); return early
+           │
            ├─ _comps[$cmd] exists → zle -C + compadd hook (_finsh_capture)
            │   pool empty (_arguments bypasses hook) ↓
            ├─ $cmd --help → _finsh_parse_help (state machine)

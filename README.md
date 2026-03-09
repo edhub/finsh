@@ -10,6 +10,25 @@ So **finsh** was born — bringing the same completion philosophy to zsh users o
 
 ---
 
+## Three Things finsh Does
+
+### 🔍 Fuzzy Autocomplete
+
+Bypass zsh's strict prefix matching — type `piclaud`, Tab, and get `pi-claude`.
+Commands, paths, subcommands, options — all fuzzy-matched from raw candidates at the ZLE layer.
+
+### 💡 History Autosuggestion
+
+As you type, the most recent matching command appears in gray after the cursor.
+Press `→` to accept it instantly — exactly like Fish.
+
+### 📂 `j` — Directory Jump
+
+`cd` into any previously visited directory by typing a fragment of any path component.
+`j fin` → `cd ~/dev/shell/finsh`. Tab completion shows all matching paths from your history.
+
+---
+
 ## Contributing
 
 This is a side project maintained in spare time. Issues and PRs may receive slow responses.
@@ -34,6 +53,7 @@ finsh collects raw candidates at the **ZLE layer**, bypassing zsh's prefix trunc
 - **Live re-filtering**: in show mode, keep typing to filter candidates in real time without pressing Tab again
 - **Multi-level fuzzy matching**: prefix → substring → head-anchored subsequence → pure subsequence
 - **History autosuggestion**: shows the matching history suffix in gray; `→` accepts in one keystroke
+- **`j` directory jump**: jump to any visited directory by component name; Tab shows matching history paths
 - **Path completion**: includes dotfiles, multi-level glob, supports `~` expansion
 - **Subcommand / option completion**: prefers zsh-registered completion functions, falls back to parsing `--help` output
 
@@ -170,11 +190,43 @@ All passes pre-filter by first letter before running. Passes degrade in order; t
 
 ---
 
+## Directory Jump (`j`)
+
+`j` is a lightweight directory jumper powered by your shell history — no database, no background daemon.
+
+Every time you `cd`, finsh records the path. Type `j` + Tab to fuzzy-complete any component from any level:
+
+```
+❯ j fin
+finsh → ~/dev/shell/finsh    finsh → ~/other/finsh
+```
+
+Direct usage (no Tab needed):
+
+```zsh
+j finsh      # exact component match → cd ~/dev/shell/finsh
+j shell      # match at any depth    → cd ~/dev/shell
+j sh/fin     # substring on path     → cd ~/dev/shell/finsh
+j            # no args               → cd ~
+```
+
+Resolution order: ① completion candidate (component → path) ② direct path ③ exact component at any depth ④ substring on full path.
+
+### Configure jump command names
+
+```zsh
+_FINSH_JUMP_CMDS=(j z)   # register both `j` and `z` as jump commands
+source ~/.zsh/plugins/finsh.zsh
+```
+
+---
+
 ## Configuration
 
 Set these variables in `~/.zshrc` **before** sourcing `finsh.zsh`:
 
 ```zsh
-_FINSH_MAX_CANDS=20   # max candidates to display / cycle through (0 = unlimited)
+_FINSH_MAX_CANDS=20       # max candidates to display / cycle through (0 = unlimited)
+_FINSH_JUMP_CMDS=(j)      # jump command names (default: j)
 source ~/.zsh/plugins/finsh.zsh
 ```

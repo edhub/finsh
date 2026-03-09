@@ -83,6 +83,18 @@ Every constraint below has a corresponding bug history entry in [DESIGN.md § Bu
 - Must wrap `accept-line`; `zle-line-finish` fires too late (Bug 14)
 - After clearing the suggestion, set `_FINSH_SUGGESTION_NEEDLE` to `"$LBUFFER"` (not `""`), to prevent `pre-redraw` from re-searching history (Bug 14)
 
+### `j` directory history completion
+
+- `_FINSH_DIR_HIST` stores **full paths** of visited directories (most-recently-visited first, deduped, capped at 500)
+- Updated by `_finsh_chpwd` (a `chpwd` hook) on every `cd`; capped at 500 entries; persisted to `$XDG_DATA_HOME/finsh/dir_hist`
+- In `_finsh_collect_subcmd_pool`: if `_cmd` is in `_FINSH_JUMP_CMDS`, build the pool as `"component → /path/prefix"` entries for every (component, ancestor) pair across all paths in `_FINSH_DIR_HIST`; deduplicate with `${(u)}`; the component is at the front so the first-letter pre-filter and prefix matching work normally; `→` is used as delimiter (not `[`/`]`) to avoid zsh glob expansion when the candidate is in LBUFFER
+- If history is empty, emit `zle -M -- "j: no directory history"` and return (never fall through to normal completion)
+- Pool building uses `_jparts`, `_ji`, `_jpath` declared **outside** the outer loop (Bug 12)
+- Jump logic lives in `_finsh_jump()`; at load time, one shell function per name in `_FINSH_JUMP_CMDS` is generated via `eval` to call it
+- `_FINSH_JUMP_CMDS` defaults to `(j)`; set before sourcing to add aliases (e.g. `_FINSH_JUMP_CMDS=(j z)`)
+- `_finsh_jump()` resolution order: ① completion candidate — 3 args `component → /full/path` (`$2 == "→"` && `[[ -d $3 ]]`) → cd `$3` directly ② direct path ③ exact component match at any level, deepest-first (most-recently-visited path wins) ④ substring on full path
+- In `_finsh_jump()`: `local _d _i _target` and `local -a _parts` must be declared **before** the outer loop (Bug 12: `local` inside a loop body prints its value on every iteration)
+
 ### Syntax pitfalls
 
 - `${${(Az)prefix}[1]}` to get the first word; do **not** write `${(z)prefix}[1]` (that yields the first character, Bug 6)
