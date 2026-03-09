@@ -65,14 +65,14 @@ finsh collects raw candidates at the **ZLE layer**, bypassing zsh's prefix trunc
 
 ```zsh
 mkdir -p ~/.zsh/plugins
-curl -fsSL https://raw.githubusercontent.com/edhub/finsh/main/finsh.zsh \
-    -o ~/.zsh/plugins/finsh.zsh
+curl -fsSL https://raw.githubusercontent.com/edhub/finsh/main/finsh.plugin.zsh \
+    -o ~/.zsh/plugins/finsh.plugin.zsh
 ```
 
 Add to `~/.zshrc`:
 
 ```zsh
-source ~/.zsh/plugins/finsh.zsh
+source ~/.zsh/plugins/finsh.plugin.zsh
 ```
 
 ### zinit
@@ -183,7 +183,7 @@ All passes pre-filter by first letter before running. Passes degrade in order; t
 
 | File | Description |
 |------|-------------|
-| `finsh.zsh` | Single implementation file |
+| `finsh.plugin.zsh` | Single implementation file |
 | `DESIGN.md` | Architecture, key mechanisms, bug history |
 | `AGENTS.md` | Modification traps and syntax pitfalls (for contributors and AI agents) |
 | `tests/test-help-parser.zsh` | Unit tests for `_finsh_parse_help` and `_finsh_filter` |
@@ -218,17 +218,17 @@ Resolution order: ① completion candidate (component → path) ② direct path 
 
 ```zsh
 _FINSH_JUMP_CMDS=(j z)   # register both `j` and `z` as jump commands
-source ~/.zsh/plugins/finsh.zsh
+source ~/.zsh/plugins/finsh.plugin.zsh
 ```
 
 ---
 
 ## Configuration
 
-Set these variables in `~/.zshrc` **before** sourcing `finsh.zsh`:
+Set these variables in `~/.zshrc` **before** sourcing `finsh.plugin.zsh`:
 
 ```zsh
 _FINSH_MAX_CANDS=20       # max candidates to display / cycle through (0 = unlimited)
 _FINSH_JUMP_CMDS=(j)      # jump command names (default: j)
-source ~/.zsh/plugins/finsh.zsh
+source ~/.zsh/plugins/finsh.plugin.zsh
 ```
