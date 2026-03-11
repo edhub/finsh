@@ -575,7 +575,17 @@ _finsh_collect_subcmd_pool() {
     _FINSH_REG_TMP=0
     _FINSH_WORD_TMP="$_word"
 
-    local _cmd="${${(Az)_prefix}[1]-}"
+    # Find the command of the current shell segment: take the first word after
+    # the last operator (&&, ||, ;, |) so that compound lines like
+    # "proxy_on && deno " correctly resolve to "deno" rather than "proxy_on".
+    local -a _pfx_tokens=( ${(Az)_prefix} )
+    local _seg_start=1 _ti
+    for (( _ti = 1; _ti <= ${#_pfx_tokens}; _ti++ )); do
+        case "${_pfx_tokens[$_ti]}" in
+            '&&'|'||'|';'|'|') _seg_start=$(( _ti + 1 )) ;;
+        esac
+    done
+    local _cmd="${_pfx_tokens[$_seg_start]-}"
 
     # ── j: complete from directory history ───────────────────────────────────
     # Expand every recorded path into all its components so that any level can
@@ -639,7 +649,7 @@ _finsh_collect_subcmd_pool() {
         _FINSH_POOL_TMP=()   # discard irrelevant candidates (e.g. filenames); use --help results instead
         local -a _help_words=()
         local _w
-        for _w in ${(Az)_prefix}; do
+        for _w in ${_pfx_tokens[$_seg_start,-1]}; do
             [[ "$_w" == -* ]] || _help_words+=("$_w")
         done
 
@@ -780,7 +790,13 @@ _finsh_complete() {
     local raw_word="$word"   # save the original word before _finsh_collect_subcmd_pool may modify it
 
     # ── Command name completion ───────────────────────────────────────────────
-    if [[ "$prefix" =~ '^[[:space:]]*$' ]]; then
+    # Two cases: prefix is blank (first word on line), or prefix ends with a
+    # shell operator (&&, ||, ;, |) meaning this word starts a new command
+    # segment (e.g. "proxy_on && deno<Tab>" should complete command names).
+    local -a _pfx_toks=( ${(Az)prefix} )
+    if [[ "$prefix" =~ '^[[:space:]]*$' ]] || \
+       [[ "${_pfx_toks[-1]-}" == "&&" || "${_pfx_toks[-1]-}" == "||" ||
+          "${_pfx_toks[-1]-}" == ";" || "${_pfx_toks[-1]-}" == "|" ]]; then
         pool=(
             ${(k)commands}
             ${(k)functions[(I)[^_]*]}
